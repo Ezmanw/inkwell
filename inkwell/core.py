@@ -119,6 +119,43 @@ def llama_cmd():
     return cmd
 
 
+ENGINE_NAMES = {"cuda": "CUDA", "vulkan": "Vulkan", "rocm": "ROCm", "cpu": "CPU only"}
+
+
+def engines():
+    """Every llama-server build we know of: {backend: path}. Builds live side by side in
+    <llama_src>/build-<backend>, so switching between them is just a restart."""
+    out = {}
+    src = Path(CONF.get("llama_src") or "")
+    for exe in sorted(src.glob("build-*/bin/llama-server")):
+        out[exe.parent.parent.name[len("build-"):]] = str(exe)
+    for b, pth in (CONF.get("extra_engines") or {}).items():
+        if Path(pth).exists():
+            out.setdefault(b, pth)
+    cur = CONF.get("llama_server")
+    if cur and Path(cur).exists() and cur not in out.values():
+        out[CONF.get("backend") or "custom"] = cur
+    return out
+
+
+def remember_current_engine():
+    """Keep an out-of-tree build (e.g. one you compiled yourself) in the Engine list after switching away."""
+    old = CONF.get("llama_server")
+    in_tree = [str(p) for p in Path(CONF.get("llama_src") or "/nonexistent").glob("build-*/bin/llama-server")]
+    if old and Path(old).exists() and old not in in_tree:
+        CONF.setdefault("extra_engines", {})[CONF.get("backend") or "custom"] = old
+
+
+def switch_engine(backend):
+    path = engines()[backend]
+    remember_current_engine()
+    CONF["backend"], CONF["llama_server"] = backend, path
+    CONF["gpu_layers"] = 0 if backend == "cpu" else (CONF["gpu_layers"] or 99)
+    save_conf()
+    stop()
+    return start()
+
+
 def running():
     return _proc is not None and _proc.poll() is None
 

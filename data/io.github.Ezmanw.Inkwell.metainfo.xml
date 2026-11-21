@@ -13,6 +13,7 @@
   <launchable type="desktop-id">io.github.Ezmanw.Inkwell.desktop</launchable>
   <url type="homepage">https://github.com/Ezmanw/inkwell</url>
   <releases>
+    <release version="0.1.5" date="2026-11-21"/>
     <release version="0.1.4" date="2026-11-21"/>
     <release version="0.1.3" date="2026-11-21"/>
     <release version="0.1.2" date="2026-11-21"/>

@@ -597,9 +597,16 @@ class ModelPage(Adw.PreferencesPage):
 
         su = Adw.PreferencesGroup(title="Setup")
         self.add(su)
-        self.setup_row = Adw.ActionRow(title="llama.cpp", subtitle_lines=2)
-        rb = Gtk.Button(label="Rebuild…", valign=Gtk.Align.CENTER, css_classes=["flat"],
-                        tooltip_text="Rebuild llama.cpp, e.g. with a different GPU backend or a newer version")
+        self.engine_row = Adw.ComboRow(title="Engine", subtitle="Switch between your llama.cpp builds; "
+                                                                "the model restarts on the new one")
+        self.engine_keys = []
+        self._engine_lock = False
+        self.engine_row.connect("notify::selected", self.on_engine)
+        su.add(self.engine_row)
+        self.setup_row = Adw.ActionRow(title="Build path", subtitle_lines=2, subtitle_selectable=True)
+        rb = Gtk.Button(label="Build another…", valign=Gtk.Align.CENTER, css_classes=["flat"],
+                        tooltip_text="Build llama.cpp with another backend (CUDA, Vulkan, ROCm, CPU) or a newer "
+                                     "version. Existing builds are kept so you can switch back")
         rb.connect("clicked", lambda *_: self.win.get_application().open_wizard(rebuild_only=True))
         self.setup_row.add_suffix(rb)
         su.add(self.setup_row)
@@ -634,6 +641,33 @@ class ModelPage(Adw.PreferencesPage):
         logexp.add_row(lsw)
         a.add(logexp)
 
+    def refresh_engines(self):
+        eng = core.engines()
+        keys = list(eng)
+        cur = core.CONF.get("backend")
+        if keys != self.engine_keys:
+            self._engine_lock = True
+            self.engine_keys = keys
+            self.engine_row.set_model(Gtk.StringList.new([core.ENGINE_NAMES.get(k, k) for k in keys] or ["None built"]))
+            self._engine_lock = False
+        if cur in keys and self.engine_row.get_selected() != keys.index(cur):
+            self._engine_lock = True
+            self.engine_row.set_selected(keys.index(cur))
+            self._engine_lock = False
+        self.engine_row.set_sensitive(len(keys) > 1)
+
+    def on_engine(self, row, _p):
+        if self._engine_lock or not self.engine_keys:
+            return
+        b = self.engine_keys[row.get_selected()]
+        if b == core.CONF.get("backend"):
+            return
+
+        def work():
+            msg = core.switch_engine(b)
+            GLib.idle_add(self.win.toast, f"Switched to {core.ENGINE_NAMES.get(b, b)}. {msg}…")
+        threading.Thread(target=work, daemon=True).start()
+
     def apply(self, *_):
         c = core.CONF
         c["ctx"] = self.ctx.keys[self.ctx.get_selected()]
@@ -667,8 +701,8 @@ class ModelPage(Adw.PreferencesPage):
         c = core.CONF
         self.head.set_description(Path(c["model"]).name if c["model"] else "No model set up")
         self.model_file_row.set_subtitle(c["model"] or "Not set")
-        self.setup_row.set_subtitle(f"{c.get('backend', '?').upper()} build · {c.get('llama_mode', '')}\n"
-                                    f"{c.get('llama_server') or 'not built yet'}")
+        self.setup_row.set_subtitle(f"{c.get('llama_server') or 'not built yet'}")
+        self.refresh_engines()
         g = st["gpu"]
         if g:
             self.vram_lbl.set_text(f"{g['used'] / 1024:.1f} / {g['total'] / 1024:.0f} GB")

@@ -108,13 +108,53 @@ def build_env(backend):
             env["PATH"] = f"{root}/bin:" + env["PATH"]
             env["CUDACXX"] = f"{root}/bin/nvcc"
     if backend == "rocm":
-        env["PATH"] = "/opt/rocm/bin:" + env["PATH"]
-        hipconfig = shutil.which("hipconfig", path=env["PATH"])
-        if hipconfig:
-            llvm = subprocess.run([hipconfig, "-l"], capture_output=True, text=True).stdout.strip()
-            if llvm and Path(llvm, "clang").exists():
-                env["HIPCXX"] = f"{llvm}/clang"
+        root = rocm_root()
+        env["PATH"] = "/opt/rocm/bin:" + (f"{root}/bin:" if root else "") + env["PATH"]
+        if root:
+            # llama.cpp's documented recipe: HIPCXX=<rocm clang>, HIP_PATH=<rocm root>
+            env["HIP_PATH"] = env["ROCM_PATH"] = root
+        clang = rocm_clang(root, env)
+        if clang:
+            env["HIPCXX"] = clang
     return env
+
+
+ROCM_GLOB = "/opt/rocm*"
+HIP_LANG = ["lib/cmake/hip-lang/hip-lang-config.cmake", "lib64/cmake/hip-lang/hip-lang-config.cmake",
+            "lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"]
+
+
+def rocm_root():
+    """The ROCm prefix that actually holds hip-lang's CMake package. Newer ROCm releases split
+    things into /opt/rocm/core-X.Y etc., where the compiler's folder is not where hip-lang lives."""
+    cands = []
+    hipconfig = shutil.which("hipconfig") or ("/opt/rocm/bin/hipconfig" if Path("/opt/rocm/bin/hipconfig").exists() else None)
+    if hipconfig:
+        out = subprocess.run([hipconfig, "-R"], capture_output=True, text=True).stdout.strip()
+        if out:
+            cands.append(out)
+    cands += [os.environ.get("ROCM_PATH", ""), os.environ.get("HIP_PATH", ""), "/opt/rocm", "/usr"]
+    cands += sorted(glob.glob(f"{ROCM_GLOB}"), reverse=True) + sorted(glob.glob(f"{ROCM_GLOB}/core-*"), reverse=True)
+    for c in cands:
+        if c and any(Path(c, h).exists() for h in HIP_LANG):
+            return str(Path(c).resolve()) if c != "/usr" else "/usr"
+    for hit in sorted(glob.glob(f"{ROCM_GLOB}/**/hip-lang-config.cmake", recursive=True)):
+        return str(Path(hit).parents[3] if "x86_64" not in hit else Path(hit).parents[4])
+    return None
+
+
+def rocm_clang(root, env):
+    cands = []
+    if root:
+        cands += [f"{root}/llvm/bin/clang", f"{root}/lib/llvm/bin/clang"]
+    hipconfig = shutil.which("hipconfig", path=env["PATH"])
+    if hipconfig:
+        llvm = subprocess.run([hipconfig, "-l"], capture_output=True, text=True).stdout.strip()
+        if llvm:
+            cands.append(f"{llvm}/clang")
+    cands += sorted(glob.glob(f"{ROCM_GLOB}/llvm/bin/clang") + glob.glob(f"{ROCM_GLOB}/*/lib/llvm/bin/clang")
+                    + glob.glob(f"{ROCM_GLOB}/lib/llvm/bin/clang"), reverse=True)
+    return next((c for c in cands if Path(c).exists()), None)
 
 
 def cmake_flags(backend, sysinfo):
@@ -127,6 +167,9 @@ def cmake_flags(backend, sysinfo):
     elif backend == "rocm":
         gfx = next((g.gfx for g in sysinfo.gpus if g.vendor == "amd" and g.gfx), "")
         f += ["-DGGML_HIP=ON"] + ([f"-DAMDGPU_TARGETS={gfx}", f"-DGPU_TARGETS={gfx}"] if gfx else [])
+        root = rocm_root()
+        if root:  # tell CMake's HIP language where hip-lang lives, independent of the compiler's folder
+            f += [f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", f"-DCMAKE_PREFIX_PATH={root}", f"-DROCM_PATH={root}"]
     return f
 
 
@@ -136,7 +179,13 @@ def build(r, src, backend, sysinfo, step, progress):
     env = build_env(backend)
     gen = ["-G", "Ninja"] if shutil.which("ninja") else []
     step("Configuring the build…", None)
-    r.run(["cmake", "-S", str(src), "-B", str(bdir), *gen, *cmake_flags(backend, sysinfo)], env=env)
+    cfg = ["cmake", "-S", str(src), "-B", str(bdir), *gen, *cmake_flags(backend, sysinfo)]
+    if r.run(cfg, env=env, check=False) != 0:
+        # A failed configure caches the bad compiler detection; wipe the cache (not the objects) and retry once.
+        r.on_log("! Configure failed; clearing the CMake cache and trying again…\n")
+        (bdir / "CMakeCache.txt").unlink(missing_ok=True)
+        shutil.rmtree(bdir / "CMakeFiles", ignore_errors=True)
+        r.run(cfg, env=env)
     ram_gb = max(1, sysinfo.ram_mb // 1024)
     jobs = max(1, min(os.cpu_count() or 2, ram_gb // 2))
     step(f"Compiling ({jobs} at a time; CUDA can take 10–20 minutes)…", 0.0)

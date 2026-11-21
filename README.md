@@ -21,6 +21,8 @@ Inkwell is a native GTK4/libadwaita app that sets everything up for you:
   chat), e.g. "Writing · 37 tok/s". The **Activity** button opens a plain-English feed ("An app sent a
   request", "Wrote 412 tokens at 36 tok/s", "Context full…") or the raw server log. **Pop out** puts it in its
   own window to keep next to dsh.
+- **Several engines, one click to switch:** build llama.cpp with CUDA, Vulkan, ROCm and/or CPU side by side
+  (*Model → Setup → Build another…*), then hot-switch under *Engine*. The model restarts on the new build.
 - **Tuning without flags:** context size, batch size, cache quality, where the vision part runs
   (GPU/CPU/off), thinking effort, thinking limit, and live VRAM and speed readouts.
 
@@ -31,7 +33,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.4_all.deb
+   sudo apt install ./inkwell_0.1.5_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
@@ -75,7 +77,9 @@ supports.
 
 ## Known issues
 
-- **ROCm** is experimental. Vulkan is the safer choice on AMD. ROCm builds of `inkling2_loop` abort on some RDNA2
+- **ROCm** is experimental. Vulkan is the safer choice on AMD. Inkwell finds ROCm's HIP CMake files even in
+  newer split layouts (`/opt/rocm/core-X.Y`), and if a build fails, *Change settings* lets you switch to Vulkan
+  without re-downloading. ROCm builds of `inkling2_loop` abort on some RDNA2
   cards ([#32732](https://github.com/ggml-org/llama.cpp/issues/32732)).
 - `--n-cpu-moe` gives garbage on long prompts with this model
   ([#32755](https://github.com/ggml-org/llama.cpp/issues/32755)). Inkwell only ever moves experts from the

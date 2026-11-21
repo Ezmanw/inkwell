@@ -412,6 +412,7 @@ class Wizard(Adw.ApplicationWindow):
         self._log_sw.set_child(self._log)
         lexp = Adw.ExpanderRow(title="Details")
         lexp.add_row(self._log_sw)
+        self._log_exp = lexp
         lg = Adw.PreferencesGroup()
         lg.add(lexp)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -419,11 +420,22 @@ class Wizard(Adw.ApplicationWindow):
         pp.set_vexpand(True)
         box.append(pp)
         self._finish_btn = footer_button("Open Inkwell", self.finish, sensitive=False)
-        self._retry_btn = Gtk.Button(label="Try again", css_classes=["pill"], halign=Gtk.Align.CENTER,
-                                     margin_bottom=18, visible=False)
+        self._retry_btn = Gtk.Button(label="Try again", css_classes=["suggested-action", "pill"])
         self._retry_btn.connect("clicked", lambda *_: self.start_install())
+        self._back_btn = Gtk.Button(label="Change settings", css_classes=["pill"],
+                                    tooltip_text="Pick a different backend (e.g. Vulkan) or model. Finished downloads are kept")
+        self._back_btn.connect("clicked", lambda *_: self.back_to_settings())
+        self._fail_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=12, margin_bottom=18,
+                                 visible=False)
+        self._fail_hint = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["warning"],
+                                    margin_start=24, margin_end=24)
+        btns = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
+        btns.append(self._back_btn)
+        btns.append(self._retry_btn)
+        self._fail_row.append(self._fail_hint)
+        self._fail_row.append(btns)
         box.append(self._finish_btn)
-        box.append(self._retry_btn)
+        box.append(self._fail_row)
         p = page("Installing", box, "install")
         p.set_can_pop(False)
         GLib.idle_add(self.start_install)
@@ -456,7 +468,8 @@ class Wizard(Adw.ApplicationWindow):
         GLib.idle_add(ui)
 
     def start_install(self):
-        self._retry_btn.set_visible(False)
+        self._fail_row.set_visible(False)
+        self._finish_btn.set_visible(True)
         self._finish_btn.set_sensitive(False)
         self.runner = builder.Runner(self.log)
         self.results = {}
@@ -526,14 +539,22 @@ class Wizard(Adw.ApplicationWindow):
     def install_done(self):
         errs = [k for k, v in self.results.items() if isinstance(v, Exception) or v is None]
         if errs:
-            self._retry_btn.set_visible(True)
-            self.toast("Something went wrong. Open Details to see why, then try again.")
+            self._finish_btn.set_visible(False)
+            self._fail_row.set_visible(True)
+            self._log_exp.set_expanded(True)
+            if "build" in errs and self.choice["backend"] == "rocm":
+                self._fail_hint.set_text("The ROCm build failed. Vulkan usually works on AMD cards: "
+                                         "Change settings → Vulkan. Your downloads are kept.")
+            else:
+                self._fail_hint.set_text("Something went wrong; the details are shown above. "
+                                         "Finished downloads are kept.")
             return False
         c, conf = self.choice, core.CONF
+        if "build" in self.results:
+            core.remember_current_engine()
+            conf["llama_server"] = self.results["build"]
         conf["backend"], conf["llama_mode"], conf["llama_src"] = c["backend"], c["llama_mode"], c["llama_src"]
         conf["models_dir"] = c["models_dir"]
-        if "build" in self.results:
-            conf["llama_server"] = self.results["build"]
         if not self.rebuild_only:
             conf["model"] = c["existing"] or self.results.get("model") or conf["model"]
             if c["vision"]:
@@ -550,6 +571,14 @@ class Wizard(Adw.ApplicationWindow):
         core.save_conf()
         self._finish_btn.set_sensitive(True)
         return False
+
+    def back_to_settings(self):
+        """After a failure: go back to pick another backend/model. Finished downloads are kept."""
+        tag = "model" if self.model_only else "backend"
+        install = self.nav.get_visible_page()
+        install.set_can_pop(True)
+        if not self.nav.pop_to_tag(tag):
+            self.nav.replace([self.page_backend()])
 
     def finish(self):
         self.on_done()
