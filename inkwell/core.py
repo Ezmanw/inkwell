@@ -5,7 +5,7 @@ Ports:
   8686  llama-server (this PC only, no key)  -> dsh / local apps
   8691  LAN API gateway (only while Wi-Fi sharing is on; Bearer key required)
 """
-import json, os, re, secrets, shutil, signal, socket, subprocess, threading, time
+import json, os, re, secrets, shlex, shutil, signal, socket, subprocess, threading, time
 import urllib.request, urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -112,7 +112,10 @@ def llama_cmd():
     if c["kv_quant"] != "f16":
         cmd += ["-ctk", c["kv_quant"], "-ctv", c["kv_quant"]]
     if c["extra_args"].strip():
-        cmd += c["extra_args"].split()
+        try:
+            cmd += shlex.split(c["extra_args"])  # quotes work: --flag "value with spaces"
+        except ValueError:
+            cmd += c["extra_args"].split()
     return cmd
 
 

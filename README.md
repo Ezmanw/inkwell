@@ -27,7 +27,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.2_all.deb
+   sudo apt install ./inkwell_0.1.3_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
@@ -48,6 +48,13 @@ To run from source instead: `./run.sh` (same dependencies as the .deb).
 | UD-Q2_K_XL | 64K | on GPU | 11.8 GB | ~24 tok/s with a 35K-token prompt |
 | UD-Q2_K_XL, 6 layers' experts in RAM | 16K | off | 7.4 GB | ~26 tok/s |
 | UD-Q2_K_XL, **Vulkan** instead of CUDA | 32K | on CPU | 10.0 GB | ~16 tok/s |
+
+## Your own llama.cpp flags
+
+*Model → Advanced → Extra llama-server flags* adds anything you type to the end of the `llama-server` command,
+so your values override Inkwell's for most settings (e.g. `--top-k 40 --repeat-penalty 1.05`). Quotes work for
+values with spaces. Don't change `--host`/`--port`, because the app, dsh and the phone API connect to
+`127.0.0.1:8686`. The exact command is shown under *Server log*.
 
 ## Where things go
 
