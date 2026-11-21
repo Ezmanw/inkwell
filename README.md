@@ -27,10 +27,15 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.1_all.deb
+   sudo apt install ./inkwell_0.1.2_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
+
+**Already downloaded the model?** On the *Storage* step, set **Models** to the folder that has your
+`Inkling-2-Mini-*.gguf` (and `mmproj-F16.gguf`), then pick the same size on the *Model* step. Files that are
+already there and complete are skipped. A half-finished download (`.part`) picks up where it stopped. You can
+also point *llama.cpp* at an existing checkout to reuse it.
 
 To run from source instead: `./run.sh` (same dependencies as the .deb).
 

@@ -250,7 +250,8 @@ class Wizard(Adw.ApplicationWindow):
     def page_storage(self):
         g = Adw.PreferencesGroup(title="Where should Inkwell keep things?")
         self._store_rows = {}
-        for key, title, sub in [("models_dir", "Models", "The model file is 8–23 GB"),
+        for key, title, sub in [("models_dir", "Models", "The model file is 8–23 GB. Pick a folder that already "
+                                                         "has Inkling files and they won't be downloaded again"),
                                 ("llama_src", "llama.cpp", "Source + build, about 1–2 GB")]:
             row = Adw.ActionRow(title=title, subtitle_selectable=True)
             row.add_css_class("property")
@@ -283,8 +284,12 @@ class Wizard(Adw.ApplicationWindow):
             except GLib.Error:
                 return
             base = Path(f.get_path())
-            self.choice[key] = str(base / ("llama.cpp" if key == "llama_src" else "inkwell-models")
-                                   if any(base.iterdir()) else base)
+            # Reuse a folder that already holds what we need; only nest inside unrelated, non-empty folders.
+            reuse = (base / ".git").exists() if key == "llama_src" else any(base.glob("*.gguf"))
+            if reuse or not any(base.iterdir()):
+                self.choice[key] = str(base)
+            else:
+                self.choice[key] = str(base / ("llama.cpp" if key == "llama_src" else "inkwell-models"))
             self.update_storage()
         dlg.select_folder(self, None, done)
 
