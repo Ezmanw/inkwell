@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Inkwell</vendor>
+  <vendor_url>https://github.com/Ezmanw/inkwell</vendor_url>
+  <action id="io.github.Ezmanw.Inkwell.install-deps">
+    <description>Install build tools for Inkwell</description>
+    <message>Inkwell needs to install the tools used to build llama.cpp for your graphics card</message>
+    <icon_name>io.github.Ezmanw.Inkwell</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/inkwell/helpers/install-deps.sh</annotate>
+  </action>
+</policyconfig>

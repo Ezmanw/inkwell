@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Inkwell
+GenericName=Local AI chat
+Comment=Run Inkling 2 Mini on your own PC
+Exec=inkwell
+Icon=io.github.Ezmanw.Inkwell
+Terminal=false
+Categories=Utility;
+Keywords=AI;LLM;llama;chat;Inkling;local;
+StartupNotify=true
+StartupWMClass=io.github.Ezmanw.Inkwell
