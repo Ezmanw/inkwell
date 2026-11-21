@@ -116,6 +116,9 @@ def build_env(backend):
         clang = rocm_clang(root, env)
         if clang:
             env["HIPCXX"] = clang
+        _, dl = rocm_hip_flags(root, clang)
+        if dl:
+            env["HIP_DEVICE_LIB_PATH"] = dl   # clang reads this too
     return env
 
 
@@ -141,6 +144,35 @@ def rocm_root():
     for hit in sorted(glob.glob(f"{ROCM_GLOB}/**/hip-lang-config.cmake", recursive=True)):
         return str(Path(hit).parents[3] if "x86_64" not in hit else Path(hit).parents[4])
     return None
+
+
+def rocm_device_libs(root, clang):
+    """Folder with ROCm's GPU bitcode (ocml.bc, ockl.bc…). Newer split installs keep it away from clang,
+    which then fails with 'cannot find ROCm device library'."""
+    cands = []
+    if clang:
+        llvm = Path(clang).parent.parent                      # …/lib/llvm
+        cands += [llvm / "amdgcn/bitcode", llvm.parent / "amdgcn/bitcode", llvm.parent.parent / "amdgcn/bitcode"]
+        cands += sorted(llvm.glob("lib/clang/*/lib/amdgcn/bitcode"), reverse=True)
+    if root:
+        cands += [Path(root, "amdgcn/bitcode"), Path(root, "lib/amdgcn/bitcode"), Path(root, "lib/llvm/amdgcn/bitcode")]
+    for c in cands:
+        if (c / "ocml.bc").exists():
+            return str(c)
+    hits = sorted(glob.glob(f"{ROCM_GLOB}/**/amdgcn/bitcode/ocml.bc", recursive=True), reverse=True)
+    hits += sorted(glob.glob("/usr/lib/llvm-*/lib/clang/*/lib/amdgcn/bitcode/ocml.bc"), reverse=True)
+    hits += sorted(glob.glob("/usr/lib/x86_64-linux-gnu/amdgcn/bitcode/ocml.bc"))
+    return str(Path(hits[0]).parent) if hits else None
+
+
+def rocm_hip_flags(root, clang):
+    flags = []
+    if root:
+        flags.append(f"--rocm-path={root}")
+    dl = rocm_device_libs(root, clang)
+    if dl:
+        flags.append(f"--rocm-device-lib-path={dl}")
+    return flags, dl
 
 
 def rocm_clang(root, env):
@@ -170,6 +202,9 @@ def cmake_flags(backend, sysinfo):
         root = rocm_root()
         if root:  # tell CMake's HIP language where hip-lang lives, independent of the compiler's folder
             f += [f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", f"-DCMAKE_PREFIX_PATH={root}", f"-DROCM_PATH={root}"]
+        hip_flags, _ = rocm_hip_flags(root, rocm_clang(root, {"PATH": "/opt/rocm/bin:" + os.environ.get("PATH", "")}))
+        if hip_flags:
+            f.append("-DCMAKE_HIP_FLAGS=" + " ".join(hip_flags))
     return f
 
 

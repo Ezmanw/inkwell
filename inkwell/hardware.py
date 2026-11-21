@@ -170,4 +170,8 @@ def missing_tools(backend):
             miss.append(("rocminfo", "detect your AMD GPU model"))
         if not (_have_header("hipblas/hipblas.h") or Path("/opt/rocm/include/hipblas/hipblas.h").exists()):
             miss.append(("hipBLAS", "ROCm math library"))
+        from . import builder  # local import: builder imports this module
+        root = builder.rocm_root()
+        if not builder.rocm_device_libs(root, builder.rocm_clang(root, {"PATH": "/opt/rocm/bin:" + os.environ.get("PATH", "")})):
+            miss.append(("ROCm device libraries", "GPU math bitcode (ocml.bc), package rocm-device-libs"))
     return miss
