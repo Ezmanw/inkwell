@@ -536,9 +536,39 @@ class ModelPage(Adw.PreferencesPage):
         self.speed_row = Adw.ActionRow(title="Speed", subtitle="Shows up after the first request from any app")
         g.add(self.speed_row)
 
+        mg = Adw.PreferencesGroup(title="Manual mode")
+        self.add(mg)
+        self.manual = Adw.SwitchRow(title="Run llama-server with my own flags",
+                                    subtitle="Inkwell adds nothing: no thinking level, sampling, context or batch "
+                                             "settings. Apps like dsh set thinking per request",
+                                    active=bool(c.get("manual")))
+        mg.add(self.manual)
+        self.manual_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
+        self.manual_view = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=10,
+                                        bottom_margin=10, left_margin=10, right_margin=10)
+        self.manual_view.get_buffer().set_text(c.get("manual_args") or core.manual_default_text())
+        msw = Gtk.ScrolledWindow(min_content_height=260, css_classes=["card"])
+        msw.set_child(self.manual_view)
+        self.manual_box.append(msw)
+        self.manual_hint = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label", "caption"])
+        self.manual_box.append(self.manual_hint)
+        mb = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        reset = Gtk.Button(label="Reset to Inkwell's command", css_classes=["pill"])
+        reset.connect("clicked", lambda *_: self.manual_view.get_buffer().set_text(core.manual_default_text()))
+        mapply = Gtk.Button(label="Apply & restart model", css_classes=["suggested-action", "pill"])
+        mapply.connect("clicked", self.apply_manual)
+        mb.append(reset)
+        mb.append(mapply)
+        self.manual_box.append(mb)
+        mg.add(self.manual_box)
+        self.manual.connect("notify::active", self.on_manual_toggle)
+        self.manual_view.get_buffer().connect("changed", lambda *_: self.sync_manual_ui()
+                                              if hasattr(self, "extra") else None)
+
         s = Adw.PreferencesGroup(title="Settings",
                                  description="Changes apply when you press Apply (the model restarts).")
         self.add(s)
+        self.settings_group = s
         self.ctx = combo_row("Context size", "How much text it can keep in mind", CTX_OPTS, c["ctx"])
         self.ub = combo_row("Batch size", "Lower uses less VRAM but reads long prompts slower", UB_OPTS, c["ubatch"])
         self.kv = combo_row("Memory cache", None, KV_OPTS, c["kv_quant"])
@@ -558,7 +588,7 @@ class ModelPage(Adw.PreferencesPage):
         ab.connect("clicked", self.apply)
         apply_row.add_suffix(ab)
 
-        th = Adw.PreferencesGroup(
+        th = self.think_group = Adw.PreferencesGroup(
             title="Thinking",
             description="Defaults for everything that uses Inkling: this chat, dsh and your phone. "
                         "Apps that ask for their own effort level still get it.")
@@ -592,6 +622,7 @@ class ModelPage(Adw.PreferencesPage):
                              css_classes=["dim-label"]))
 
         ag = Adw.PreferencesGroup()
+        self.apply_group = ag
         self.add(ag)
         ag.add(apply_row)
 
@@ -641,6 +672,10 @@ class ModelPage(Adw.PreferencesPage):
         logexp.add_row(lsw)
         a.add(logexp)
 
+    def do_map(self):
+        Adw.PreferencesPage.do_map(self)
+        self.sync_manual_ui()
+
     def refresh_engines(self):
         eng = core.engines()
         keys = list(eng)
@@ -666,6 +701,60 @@ class ModelPage(Adw.PreferencesPage):
         def work():
             msg = core.switch_engine(b)
             GLib.idle_add(self.win.toast, f"Switched to {core.ENGINE_NAMES.get(b, b)}. {msg}…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def manual_text(self):
+        b = self.manual_view.get_buffer()
+        return b.get_text(b.get_start_iter(), b.get_end_iter(), False)
+
+    def sync_manual_ui(self):
+        on = self.manual.get_active()
+        self.manual_box.set_visible(on)
+        for w in (self.settings_group, self.think_group, self.apply_group, self.cpu_layers, self.ngl, self.extra):
+            w.set_sensitive(not on)
+        self.settings_group.set_description("Ignored in Manual mode." if on else
+                                            "Changes apply when you press Apply (the model restarts).")
+        try:
+            argv = core.manual_argv(self.manual_text())
+            h, p = "127.0.0.1", 8080
+            for i, a in enumerate(argv):
+                k, _, v = a.partition("=")
+                v = v or (argv[i + 1] if i + 1 < len(argv) else "")
+                if k == "--port" and v.isdigit():
+                    p = int(v)
+                if k == "--host" and v not in ("0.0.0.0", "::", "[::]"):
+                    h = v
+            notes = [f"Inkwell will talk to it at http://{h}:{p}" + ("" if any(a.split("=")[0] == "--port" for a in argv)
+                                                                     else " (llama-server's default; add --port to change)")]
+            if not any(a in ("-m", "--model", "-hf", "--hf-repo") or a.startswith(("--model=", "-hf=")) for a in argv):
+                notes.append("⚠ No -m/--model given")
+            notes.append("One flag per line is easiest; # starts a comment.")
+            self.manual_hint.set_text(" · ".join(notes))
+        except ValueError as e:
+            self.manual_hint.set_text(f"⚠ Can't read this: {e}")
+
+    def on_manual_toggle(self, *_):
+        self.sync_manual_ui()
+        if not self.manual.get_active() and core.CONF.get("manual"):
+            core.CONF["manual"] = False
+            core.save_conf()
+            threading.Thread(target=lambda: (core.stop(), core.start(),
+                                             GLib.idle_add(self.win.toast, "Back to Inkwell's settings. Restarting…")),
+                             daemon=True).start()
+
+    def apply_manual(self, *_):
+        text = self.manual_text()
+        try:
+            core.manual_argv(text)
+        except ValueError as e:
+            return self.win.toast(f"Can't read the flags: {e}")
+        core.CONF["manual"], core.CONF["manual_args"] = True, text
+        core.save_conf()
+
+        def work():
+            core.stop()
+            msg = core.start()
+            GLib.idle_add(self.win.toast, f"Manual mode: {msg}…")
         threading.Thread(target=work, daemon=True).start()
 
     def apply(self, *_):
@@ -699,7 +788,8 @@ class ModelPage(Adw.PreferencesPage):
         self.start_btn.set_visible(not run)
         self.stop_btn.set_visible(run)
         c = core.CONF
-        self.head.set_description(Path(c["model"]).name if c["model"] else "No model set up")
+        self.head.set_description("Manual mode · running your own flags" if c.get("manual") else
+                                  Path(c["model"]).name if c["model"] else "No model set up")
         self.model_file_row.set_subtitle(c["model"] or "Not set")
         self.setup_row.set_subtitle(f"{c.get('llama_server') or 'not built yet'}")
         self.refresh_engines()
@@ -801,7 +891,7 @@ class NetworkPage(Adw.PreferencesPage):
                                              "provider. No API key needed.")
         self.add(l)
         self.local_row = copy_row("Base URL", win)
-        self.local_row.set_subtitle(f"http://127.0.0.1:{core.LLAMA_PORT}/v1")
+        self.local_row.set_subtitle(core.llama_url("/v1"))
         l.add(self.local_row)
         m2 = copy_row("Model", win)
         m2.set_subtitle(core.MODEL_ID)
@@ -815,6 +905,7 @@ class NetworkPage(Adw.PreferencesPage):
             self.win.toast(f"Couldn't update dsh: {e}")
 
     def update(self, st):
+        self.local_row.set_subtitle(core.llama_url("/v1"))
         on = core.CONF["lan"]
         url = f"http://{st['ip']}:{core.LAN_PORT}/v1"
         self.url_row.set_subtitle(url)

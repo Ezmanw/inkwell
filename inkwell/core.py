@@ -41,6 +41,8 @@ DEFAULTS = {
     "lan": False,
     "token": "sk-inkwell-" + secrets.token_urlsafe(18),
     "dsh_profile": "web",
+    "manual": False,          # Manual mode: run llama-server with exactly manual_args, nothing added
+    "manual_args": "",
     "autostart": True,
     "think_effort": 0.7,     # 0 (off) .. 0.99 (max); default for every client (chat, dsh, phone)
     "think_budget": -1,      # max thinking tokens, -1 = no limit
@@ -87,6 +89,54 @@ _proc = None
 
 
 def llama_cmd():
+    if CONF.get("manual"):
+        return [CONF["llama_server"]] + manual_argv()
+    return auto_cmd()
+
+
+def manual_argv(text=None):
+    text = CONF.get("manual_args", "") if text is None else text
+    return shlex.split(text, comments=True)   # newlines are just spaces; '#' starts a comment
+
+
+def manual_default_text():
+    """Inkwell's own command, one flag per line, as a starting point for Manual mode."""
+    args, lines, cur = auto_cmd()[1:], [], []
+    for a in args:
+        if a.startswith("-") and not re.fullmatch(r"-\d+(\.\d+)?", a) and cur:
+            lines.append(" ".join(shlex.quote(x) for x in cur)); cur = []
+        cur.append(a)
+    if cur:
+        lines.append(" ".join(shlex.quote(x) for x in cur))
+    return "\n".join(lines) + "\n"
+
+
+def llama_addr():
+    """(host, port) to reach llama-server. Manual mode follows the user's own --host/--port."""
+    if not CONF.get("manual"):
+        return "127.0.0.1", LLAMA_PORT
+    host, port = "127.0.0.1", 8080          # llama-server's built-in defaults
+    try:
+        argv = manual_argv()
+    except ValueError:
+        argv = []
+    for i, a in enumerate(argv):
+        k, _, v = a.partition("=")
+        if k == "--port":
+            v = v or (argv[i + 1] if i + 1 < len(argv) else "")
+            port = int(v) if v.isdigit() else port
+        elif k == "--host":
+            v = v or (argv[i + 1] if i + 1 < len(argv) else "")
+            host = v if v and v not in ("0.0.0.0", "::", "[::]") else host
+    return host, port
+
+
+def llama_url(path=""):
+    h, p = llama_addr()
+    return f"http://{h}:{p}{path}"
+
+
+def auto_cmd():
     c = CONF
     cmd = [c["llama_server"], "-m", c["model"], "--alias", MODEL_ID,
            "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
@@ -169,7 +219,7 @@ def start():
     with _lock:
         if running():
             return "Already running"
-        for k in ("llama_server", "model"):
+        for k in (("llama_server",) if CONF.get("manual") else ("llama_server", "model")):
             if not CONF[k] or not Path(CONF[k]).exists():
                 return f"Missing file: {CONF[k]}"
         log = open(LOG_PATH, "w")
@@ -198,7 +248,7 @@ def stop():
 def health():
     """None = not reachable, 'loading', 'ok'."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{LLAMA_PORT}/health", timeout=1) as r:
+        with urllib.request.urlopen(llama_url("/health"), timeout=1) as r:
             return json.loads(r.read()).get("status", "ok")
     except urllib.error.HTTPError as e:
         return "loading" if e.code == 503 else f"error {e.code}"
@@ -367,7 +417,7 @@ def chat_stream(messages, effort, on_reasoning, on_content, cancel):
     if effort is not None:  # None = use the server default from the Model tab
         req_body["chat_template_kwargs"] = {"reasoning_effort": float(effort)}
     body = json.dumps(req_body).encode()
-    req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_PORT}/v1/chat/completions", data=body,
+    req = urllib.request.Request(llama_url("/v1/chat/completions"), data=body,
                                  headers={"Content-Type": "application/json"})
     try:
         r = urllib.request.urlopen(req, timeout=3600)
@@ -453,10 +503,19 @@ def dsh_connect(make_default):
     provider = {
         "displayName": "Inkling 2 Mini (this PC)",
         "api": "openai-completions",
-        "baseURL": f"http://127.0.0.1:{LLAMA_PORT}/v1",
+        "baseURL": llama_url("/v1"),
+        # llama-server needs no key, but dsh's OpenAI client refuses to send without one
+        # ("No API key for provider"); its docs say to give keyless local servers a placeholder header.
+        "headers": {"Authorization": "Bearer inkwell-local"},
         "models": [{"id": MODEL_ID, "name": "Inkling 2 Mini", "contextWindow": int(CONF["ctx"]),
                     "maxTokens": min(16384, int(CONF["ctx"]) // 2),
-                    "input": ["text", "image"] if CONF["vision_mode"] != "off" else ["text"]}],
+                    "input": ["text", "image"] if CONF["vision_mode"] != "off" else ["text"],
+                    # dsh level -> reasoning_effort sent to llama-server. Inkling's template knows
+                    # minimal .1 / low .2 / medium .7 / high .9 / xhigh .99. There's no real "off":
+                    # 'none' is buggy in llama.cpp (#32753, gives 0.9), so off -> minimal.
+                    "reasoningEfforts": {"off": "minimal", "minimal": "minimal", "low": "low",
+                                         "medium": "medium", "high": "high", "xhigh": "xhigh"},
+                    "compat": {"supportsReasoningEffort": True}}],
     }
     for e in entries:
         if e.get("id") == "llm-pi-ai":
@@ -506,7 +565,7 @@ class _Gateway(BaseHTTPRequestHandler):
             return self._json({"error": {"message": "Not found"}}, 404)
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
-        req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_PORT}{path}", data=body, method=self.command,
+        req = urllib.request.Request(llama_url(path), data=body, method=self.command,
                                      headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
         try:
             r = urllib.request.urlopen(req, timeout=3600)

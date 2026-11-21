@@ -33,7 +33,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.6_all.deb
+   sudo apt install ./inkwell_0.1.7_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
@@ -55,7 +55,22 @@ To run from source instead: `./run.sh` (same dependencies as the .deb).
 | UD-Q2_K_XL, 6 layers' experts in RAM | 16K | off | 7.4 GB | ~26 tok/s |
 | UD-Q2_K_XL, **Vulkan** instead of CUDA | 32K | on CPU | 10.0 GB | ~16 tok/s |
 
-## Your own llama.cpp flags
+## Manual mode (bring your own flags)
+
+*Model → Manual mode* runs `llama-server` with **exactly** the flags you type and nothing else: no sampling
+defaults, no thinking level, no context/batch settings (those controls grey out). It starts pre-filled with
+Inkwell's own command, one flag per line, and `#` starts a comment. Inkwell follows your `--host`/`--port`
+(llama-server's default is 8080), so the chat, Activity view, phone API and dsh button keep working.
+
+## dsh thinking levels
+
+*Connect dsh* adds Inkling with dsh's thinking picker wired to what the model supports:
+**minimal / low / medium / high / xhigh** (Inkling's template maps them to effort 0.1 / 0.2 / 0.7 / 0.9 / 0.99).
+dsh's *off* maps to *minimal*, because Inkling can't fully skip thinking and llama.cpp's `none` is currently
+buggy ([#32753](https://github.com/ggml-org/llama.cpp/issues/32753)). Updating from ≤ 0.1.6? Press *Connect dsh*
+again: older versions left out the placeholder auth header dsh needs for keyless local servers.
+
+## Extra flags on top of Inkwell's
 
 *Model → Advanced → Extra llama-server flags* adds anything you type to the end of the `llama-server` command,
 so your values override Inkwell's for most settings (e.g. `--top-k 40 --repeat-penalty 1.05`). Quotes work for
