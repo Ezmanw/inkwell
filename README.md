@@ -33,7 +33,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.7_all.deb
+   sudo apt install ./inkwell_0.1.8_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
@@ -59,7 +59,7 @@ To run from source instead: `./run.sh` (same dependencies as the .deb).
 
 *Model → Manual mode* runs `llama-server` with **exactly** the flags you type and nothing else: no sampling
 defaults, no thinking level, no context/batch settings (those controls grey out). It starts pre-filled with
-Inkwell's own command, one flag per line, and `#` starts a comment. Inkwell follows your `--host`/`--port`
+Inkwell's own command, one flag per line, and `#` starts a comment. It warns about characters that sneak in when copying flags from a web page or chat (hidden spaces, zero-width characters, curly quotes and dashes) and cleans them up on Apply. Inkwell follows your `--host`/`--port`
 (llama-server's default is 8080), so the chat, Activity view, phone API and dsh button keep working.
 
 ## dsh thinking levels

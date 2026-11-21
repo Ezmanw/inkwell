@@ -99,6 +99,47 @@ def manual_argv(text=None):
     return shlex.split(text, comments=True)   # newlines are just spaces; '#' starts a comment
 
 
+# Characters that sneak in when flags are copied from web pages or chats.
+_INVISIBLE = {"\u00a0": "non-breaking space", "\u2007": "figure space", "\u202f": "narrow no-break space",
+              "\u200b": "zero-width space", "\u200c": "zero-width non-joiner", "\u200d": "zero-width joiner",
+              "\u2060": "word joiner", "\ufeff": "invisible BOM", "\u00ad": "soft hyphen"}
+_LOOKALIKE = {"\u2013": ("en dash", "-"), "\u2014": ("em dash", "--"), "\u2212": ("minus sign", "-"),
+              "\u201c": ("curly quote", '"'), "\u201d": ("curly quote", '"'),
+              "\u2018": ("curly quote", "'"), "\u2019": ("curly quote", "'")}
+
+
+def manual_issues(text):
+    """Problems a human can't see: [(line number, message)]."""
+    import unicodedata
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        code = line.split("#", 1)[0] if "#" in line else line
+        for ch in sorted(set(code)):
+            if ch in _INVISIBLE:
+                out.append((n, f"hidden {_INVISIBLE[ch]}"))
+            elif ch in _LOOKALIKE:
+                out.append((n, f"{_LOOKALIKE[ch][0]} (looks like {_LOOKALIKE[ch][1]!r} but isn't)"))
+            elif ch not in "\t" and unicodedata.category(ch) in ("Cc", "Cf", "Zs") and ch != " ":
+                out.append((n, f"invisible character U+{ord(ch):04X}"))
+        try:
+            toks = shlex.split(code, comments=False)
+        except ValueError:
+            continue
+        if "" in toks:
+            out.append((n, "empty argument (\"\" or '')"))
+    return list(dict.fromkeys(out))
+
+
+def manual_clean(text):
+    """Fix what's safe to fix: hidden spaces -> spaces, zero-width chars removed, curly quotes and
+    dashes -> plain ones. Empty arguments are left for the user to look at."""
+    for ch in _INVISIBLE:
+        text = text.replace(ch, " " if ch in "\u00a0\u2007\u202f" else "")
+    for ch, (_, rep) in _LOOKALIKE.items():
+        text = text.replace(ch, rep)
+    return text
+
+
 def manual_default_text():
     """Inkwell's own command, one flag per line, as a starting point for Manual mode."""
     args, lines, cur = auto_cmd()[1:], [], []

@@ -553,6 +553,12 @@ class ModelPage(Adw.PreferencesPage):
         self.manual_hint = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label", "caption"])
         self.manual_box.append(self.manual_hint)
         mb = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        self.clean_btn = Gtk.Button(label="Clean up", css_classes=["pill"], visible=False,
+                                    tooltip_text="Replace hidden spaces, zero-width characters and curly "
+                                                 "quotes/dashes with plain ones")
+        self.clean_btn.connect("clicked", lambda *_: self.manual_view.get_buffer().set_text(
+            core.manual_clean(self.manual_text())))
+        mb.append(self.clean_btn)
         reset = Gtk.Button(label="Reset to Inkwell's command", css_classes=["pill"])
         reset.connect("clicked", lambda *_: self.manual_view.get_buffer().set_text(core.manual_default_text()))
         mapply = Gtk.Button(label="Apply & restart model", css_classes=["suggested-action", "pill"])
@@ -728,6 +734,14 @@ class ModelPage(Adw.PreferencesPage):
                                                                      else " (llama-server's default; add --port to change)")]
             if not any(a in ("-m", "--model", "-hf", "--hf-repo") or a.startswith(("--model=", "-hf=")) for a in argv):
                 notes.append("⚠ No -m/--model given")
+            issues = core.manual_issues(self.manual_text())
+            self.clean_btn.set_visible(any("empty argument" not in m for _, m in issues))
+            if issues:
+                self.manual_hint.add_css_class("warning")
+                self.manual_hint.set_text("⚠ " + "; ".join(f"line {n}: {m}" for n, m in issues[:6])
+                                          + (" …" if len(issues) > 6 else "") + "\n" + " · ".join(notes))
+                return
+            self.manual_hint.remove_css_class("warning")
             notes.append("One flag per line is easiest; # starts a comment.")
             self.manual_hint.set_text(" · ".join(notes))
         except ValueError as e:
@@ -744,10 +758,19 @@ class ModelPage(Adw.PreferencesPage):
 
     def apply_manual(self, *_):
         text = self.manual_text()
+        fixed = [m for _, m in core.manual_issues(text) if "empty argument" not in m]
+        if fixed:
+            text = core.manual_clean(text)
+            self.manual_view.get_buffer().set_text(text)
+        empty = [n for n, m in core.manual_issues(text) if "empty argument" in m]
+        if empty:
+            return self.win.toast(f"Line {empty[0]} has an empty argument (\"\" or ''). Remove it first")
         try:
             core.manual_argv(text)
         except ValueError as e:
             return self.win.toast(f"Can't read the flags: {e}")
+        if fixed:
+            self.win.toast(f"Cleaned up {len(fixed)} hidden/look-alike character issue(s)")
         core.CONF["manual"], core.CONF["manual_args"] = True, text
         core.save_conf()
 
