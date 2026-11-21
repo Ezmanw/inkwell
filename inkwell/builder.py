@@ -69,6 +69,13 @@ def prepare_source(r, src, mode, step):
         if src.exists() and any(src.iterdir()):
             raise RuntimeError(f"{src} exists and isn't a llama.cpp checkout. Pick an empty folder.")
         r.run(["git", "clone", "--filter=blob:none", "--progress", LLAMA_GIT, str(src)])
+    # Already at the tested version with the fix? Leave the files alone so the rebuild is incremental.
+    if mode == "recommended" and r.out(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=src) == "inkwell":
+        has = lambda c: r.run(["git", "merge-base", "--is-ancestor", c, "HEAD"], cwd=src, check=False) == 0
+        clean = r.out(["git", "status", "--porcelain", "--untracked-files=no"], cwd=src) == ""
+        if clean and r.out(["git", "rev-parse", "HEAD^1"], cwd=src) == PINNED_BASE and has(FIX_PR_COMMIT):
+            step("llama.cpp source is up to date", None)
+            return "fix-merged"
     step("Updating llama.cpp…", None)
     r.run(["git", "fetch", "--filter=blob:none", "origin", "master"], cwd=src)
     base = PINNED_BASE if mode == "recommended" else "FETCH_HEAD"

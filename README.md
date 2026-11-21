@@ -27,7 +27,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.0_all.deb
+   sudo apt install ./inkwell_0.1.1_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
@@ -41,6 +41,8 @@ To run from source instead: `./run.sh` (same dependencies as the .deb).
 | UD-Q2_K_XL (9.1 GB) | 32K | on GPU | 11.1 GB | ~38 tok/s |
 | UD-Q2_K_XL | 32K | on CPU | 9.6 GB | ~38 tok/s |
 | UD-Q2_K_XL | 64K | on GPU | 11.8 GB | ~24 tok/s with a 35K-token prompt |
+| UD-Q2_K_XL, 6 layers' experts in RAM | 16K | off | 7.4 GB | ~26 tok/s |
+| UD-Q2_K_XL, **Vulkan** instead of CUDA | 32K | on CPU | 10.0 GB | ~16 tok/s |
 
 ## Where things go
 

@@ -932,6 +932,8 @@ class App(Adw.Application):
             self.wiz = None
             if rebuild_only or model_only:
                 threading.Thread(target=lambda: (core.stop(), core.start()), daemon=True).start()
+            elif core.CONF["autostart"]:
+                core.start()  # first run: startup skipped autostart because setup wasn't done yet
             self.activate()
         if rebuild_only or model_only:
             threading.Thread(target=core.stop, daemon=True).start()
