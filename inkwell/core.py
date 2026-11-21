@@ -138,6 +138,7 @@ def start():
         log = open(LOG_PATH, "w")
         log.write("$ " + " ".join(llama_cmd()) + "\n\n")
         log.flush()
+        activity.started_at = time.time()
         _proc = subprocess.Popen(llama_cmd(), stdout=log, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, start_new_session=True)
         return "Starting"
@@ -186,6 +187,132 @@ def gpu():
         return None
 
 
+# ---------------- activity (parsed from llama-server's log, so it covers every app) ----------------
+class Activity:
+    """Turns llama-server log lines into live status + a plain-English event feed."""
+    RX = {
+        "start": re.compile(r"launch_slot_.*\| task (\d+) \| processing task"),
+        "prompt": re.compile(r"\| task (\d+) \| prompt processing, n_tokens =\s*(\d+), progress = ([\d.]+), "
+                             r"t =\s*([\d.]+) s / ([\d.]+) tokens per second"),
+        "gen": re.compile(r"\| task (\d+) \| n_gen =\s*(\d+), tg =\s*([\d.]+) t/s, tg_3s =\s*([\d.]+)"),
+        "p_eval": re.compile(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens.*?([\d.]+) tokens per second"),
+        "eval": re.compile(r"\|\s+eval time =\s*([\d.]+) ms /\s*(\d+) tokens.*?([\d.]+) tokens per second"),
+        "draft": re.compile(r"draft acceptance = ([\d.]+) \(\s*(\d+) accepted /\s*(\d+) generated\)"),
+        "release": re.compile(r"release: .*stop processing: n_tokens = (\d+), truncated = (\d)"),
+        "cancel": re.compile(r"srv\s+stop: cancel task"),
+        "error": re.compile(r"^\S+ E (.*)"),
+        "loading": re.compile(r"load_model: loading model '([^']+)'"),
+        "ready": re.compile(r"server_run_i: model loaded"),
+    }
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.events = []          # newest last: (time.time(), kind, text)
+        self.offset = 0
+        self.ino = None
+        self.pending = []         # (time, source) noted by our chat / the LAN gateway
+        self.reset_live()
+        self.last = None          # summary of the last finished request
+        self.started_at = None    # wall-clock time llama-server was launched (log times are relative to it)
+        self.t = None
+
+    def reset_live(self):
+        self.state, self.task, self.source = "idle", None, ""
+        self.prompt_frac = self.prompt_n = self.prompt_tps = 0
+        self.gen_n = self.gen_tps = 0
+        self.p_eval = None
+
+    def note_request(self, source):
+        with self.lock:
+            self.pending.append((time.time(), source))
+
+    def add(self, kind, text):
+        self.events.append((self.t or time.time(), kind, text))
+        del self.events[:-300]
+
+    def poll(self):
+        """Read new log lines. Cheap; call every second or two."""
+        try:
+            st = LOG_PATH.stat()
+        except OSError:
+            return
+        with self.lock:
+            if st.st_ino != self.ino or st.st_size < self.offset:  # server restarted -> new log
+                self.ino, self.offset = st.st_ino, 0
+                self.reset_live()
+            with open(LOG_PATH, "r", errors="replace") as f:
+                f.seek(self.offset)
+                data = f.read()
+                self.offset = f.tell()
+            for line in data.splitlines():
+                m = re.match(r"(\d+)\.(\d+)\.(\d+)\.\d+ ", line)  # minutes.seconds.ms.us since launch
+                self.t = (self.started_at + int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 1000
+                          if m and self.started_at else None)
+                self._line(line)
+            self.t = None
+
+    def _who(self):
+        now = time.time()
+        self.pending = [(t, s) for t, s in self.pending if now - t < 15]
+        return self.pending.pop(0)[1] if self.pending else "An app on this PC (dsh or similar)"
+
+    def _line(self, line):
+        R = self.RX
+        if (m := R["start"].search(line)):
+            self.reset_live()
+            self.state, self.task, self.source = "reading", m.group(1), self._who()
+            self.add("start", f"{self.source} sent a request")
+        elif (m := R["prompt"].search(line)):
+            self.state = "reading"
+            self.prompt_n, self.prompt_frac, self.prompt_tps = int(m.group(2)), float(m.group(3)), float(m.group(5))
+        elif (m := R["gen"].search(line)):
+            self.state = "writing"
+            self.gen_n, self.gen_tps = int(m.group(2)), float(m.group(4))
+        elif (m := R["p_eval"].search(line)):
+            self.p_eval = (int(m.group(2)), float(m.group(3)))
+        elif (m := R["eval"].search(line)):
+            n, tps, secs = int(m.group(2)), float(m.group(3)), float(m.group(1)) / 1000
+            pn, ptps = self.p_eval or (0, 0)
+            self.last = {"tokens": n, "tps": tps, "secs": secs, "prompt": pn, "prompt_tps": ptps,
+                         "source": self.source, "time": time.time()}
+            self.add("done", f"Wrote {n:,} tokens at {tps:.1f} tok/s in {secs:.0f}s"
+                             + (f" · read {pn:,} new prompt tokens at {ptps:.0f}/s" if pn > 1 else ""))
+        elif (m := R["draft"].search(line)):
+            if self.events and self.events[-1][1] == "done":
+                t, k, txt = self.events[-1]
+                self.events[-1] = (t, k, txt + f" · draft model guessed {float(m.group(1)) * 100:.0f}% right")
+        elif (m := R["release"].search(line)):
+            if m.group(2) == "1":
+                self.add("warn", f"Context full: the conversation hit the {int(m.group(1)):,}-token limit and the "
+                                 "oldest part was cut off. Raise Context size or start a new chat.")
+            self.state = "idle"
+        elif R["cancel"].search(line):
+            self.add("stop", "The app stopped the request")
+            self.state = "idle"
+        elif (m := R["error"].search(line)):
+            msg = re.sub(r"^\S+\s+\S+:\s*", "", m.group(1)).strip()
+            if "exceeds the available context" in msg:
+                msg = "A request was too long for the context size and was rejected. Raise Context size."
+            self.add("error", msg[:240])
+        elif (m := R["loading"].search(line)):
+            self.add("info", f"Loading {Path(m.group(1)).name}…")
+        elif R["ready"].search(line):
+            self.add("ok", "Model loaded and ready")
+
+    def live(self):
+        with self.lock:
+            return {"state": self.state, "source": self.source, "prompt_frac": self.prompt_frac,
+                    "prompt_n": self.prompt_n, "prompt_tps": self.prompt_tps, "gen_n": self.gen_n,
+                    "gen_tps": self.gen_tps, "last": self.last}
+
+    def feed(self, n=150):
+        with self.lock:
+            return list(self.events[-n:])
+
+
+activity = Activity()
+
+
 def log_tail(n=60):
     try:
         return "".join(LOG_PATH.read_text(errors="replace").splitlines(True)[-n:])
@@ -195,6 +322,7 @@ def log_tail(n=60):
 
 # ---------------- chat (used by the app) ----------------
 def chat_stream(messages, effort, on_reasoning, on_content, cancel):
+    activity.note_request("Inkwell chat")
     """Stream a chat completion. Calls on_reasoning/on_content with text pieces.
     Returns (timings dict or None). Raises on HTTP errors."""
     req_body = {"model": MODEL_ID, "stream": True, "messages": messages,
@@ -332,8 +460,11 @@ class _Gateway(BaseHTTPRequestHandler):
 
     def _handle(self):
         if not secrets.compare_digest(self.headers.get("Authorization", ""), f"Bearer {CONF['token']}"):
+            activity.add("warn", f"Blocked a Wi-Fi request with a wrong API key from {self.client_address[0]}")
             return self._json({"error": {"message": "Invalid API key", "type": "invalid_request_error"}}, 401)
         path = self.path.split("?")[0]
+        if self.command == "POST" and path.endswith("/completions"):
+            activity.note_request(f"A device on Wi-Fi ({self.client_address[0]})")
         if not path.startswith("/v1/"):
             return self._json({"error": {"message": "Not found"}}, 404)
         n = int(self.headers.get("Content-Length") or 0)

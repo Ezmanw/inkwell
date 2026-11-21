@@ -533,7 +533,7 @@ class ModelPage(Adw.PreferencesPage):
         vb.append(self.vram_bar)
         self.vram_row.add_suffix(vb)
         g.add(self.vram_row)
-        self.speed_row = Adw.ActionRow(title="Last reply speed", subtitle="Send a chat message to measure")
+        self.speed_row = Adw.ActionRow(title="Speed", subtitle="Shows up after the first request from any app")
         g.add(self.speed_row)
 
         s = Adw.PreferencesGroup(title="Settings",
@@ -674,8 +674,16 @@ class ModelPage(Adw.PreferencesPage):
             self.vram_lbl.set_text(f"{g['used'] / 1024:.1f} / {g['total'] / 1024:.0f} GB")
             self.vram_bar.set_value(g["used"] / g["total"])
             self.vram_row.set_subtitle(g["name"] + (f" · Inkling uses {g['model'] / 1024:.1f} GB" if g["model"] else ""))
-        if self.win.last_speed:
-            self.speed_row.set_subtitle(self.win.last_speed)
+        lv = core.activity.live()
+        if lv["state"] == "writing":
+            self.speed_row.set_subtitle(f"Writing now at {lv['gen_tps']:.1f} tok/s for {lv['source']}")
+        elif lv["state"] == "reading":
+            self.speed_row.set_subtitle(f"Reading a {lv['prompt_n']:,}-token prompt for {lv['source']}")
+        elif lv["last"]:
+            l = lv["last"]
+            self.speed_row.set_subtitle(f"Last: {l['tps']:.1f} tok/s writing"
+                                        + (f", {l['prompt_tps']:.0f} tok/s reading" if l["prompt"] > 1 else "")
+                                        + f" · {l['source']} · {ago(l['time'])}")
         buf = self.log.get_buffer()
         if buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False) != st["log"]:
             adj = self.log_sw.get_vadjustment()
@@ -804,6 +812,183 @@ class NetworkPage(Adw.PreferencesPage):
         self.dsh_row.set_subtitle(txt)
 
 
+# ---------------- activity dropdown ----------------
+KIND_ICON = {"start": "mail-send-symbolic", "done": "emblem-ok-symbolic", "warn": "dialog-warning-symbolic",
+             "error": "dialog-error-symbolic", "stop": "media-playback-stop-symbolic",
+             "info": "content-loading-symbolic", "ok": "emblem-ok-symbolic"}
+
+
+def live_text(lv):
+    if lv["state"] == "reading":
+        return (f"Reading prompt · {lv['prompt_frac'] * 100:.0f}% of {lv['prompt_n']:,} tokens"
+                + (f" · {lv['prompt_tps']:.0f} tok/s" if lv["prompt_tps"] else ""))
+    if lv["state"] == "writing":
+        return f"Writing · {lv['gen_tps']:.1f} tok/s · {lv['gen_n']:,} tokens so far"
+    return "Idle"
+
+
+class ActivityView(Gtk.Box):
+    """Live status + plain-English feed (or the raw server log), newest at the bottom like a terminal."""
+
+    def __init__(self, win, compact):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.win = win
+        self.shown = []            # events currently in the list
+        status = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["card"], margin_bottom=2)
+        self.status = Gtk.Label(xalign=0, css_classes=["title-4", "numeric"], margin_top=8, margin_start=12, margin_end=12)
+        self.source = Gtk.Label(xalign=0, css_classes=["dim-label", "caption"], margin_bottom=8, margin_start=12,
+                                margin_end=12, ellipsize=Pango.EllipsizeMode.END)
+        status.append(self.status)
+        status.append(self.source)
+        self.append(status)
+
+        bar = Gtk.Box(spacing=6)
+        self.mode_feed = Gtk.ToggleButton(label="What it's doing", active=True)
+        self.mode_raw = Gtk.ToggleButton(label="Raw log", group=self.mode_feed)
+        seg = Gtk.Box(css_classes=["linked"])
+        seg.append(self.mode_feed)
+        seg.append(self.mode_raw)
+        bar.append(seg)
+        bar.append(Gtk.Box(hexpand=True))
+        cp = Gtk.Button(icon_name="edit-copy-symbolic", css_classes=["flat"],
+                        tooltip_text="Copy the full technical log (to send to someone)")
+        cp.connect("clicked", lambda *_: (copy_text(self, core.log_tail(3000)), self.win.toast("Log copied")))
+        bar.append(cp)
+        self.extra = bar
+        self.append(bar)
+
+        self.stack = Gtk.Stack(vexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.list = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE, valign=Gtk.Align.END)
+        self.feed_sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        self.feed_sw.set_child(self.list)
+        self.raw = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.CHAR, css_classes=["log"],
+                                top_margin=6, bottom_margin=6, left_margin=6, right_margin=6)
+        self.raw_sw = Gtk.ScrolledWindow(vexpand=True)
+        self.raw_sw.set_child(self.raw)
+        if compact:
+            for sw in (self.feed_sw, self.raw_sw):
+                sw.set_min_content_height(340)
+                sw.set_max_content_height(340)
+        self.stack.add_named(self.feed_sw, "feed")
+        self.stack.add_named(self.raw_sw, "raw")
+        self.append(self.stack)
+        self.mode_feed.connect("toggled", lambda b: b.get_active() and self.stack.set_visible_child_name("feed"))
+        self.mode_raw.connect("toggled", lambda b: b.get_active() and (self.stack.set_visible_child_name("raw"),
+                                                                       self.refresh(force=True)))
+        self.refresh(force=True)
+
+    @staticmethod
+    def _at_end(sw):
+        a = sw.get_vadjustment()
+        return a.get_value() + a.get_page_size() >= a.get_upper() - 30
+
+    @staticmethod
+    def _to_end(sw):
+        GLib.idle_add(lambda: sw.get_vadjustment().set_value(sw.get_vadjustment().get_upper()) or False)
+
+    def _row(self, t, kind, text):
+        row = Adw.ActionRow(title=GLib.markup_escape_text(text), title_lines=5,
+                            subtitle=time.strftime("%H:%M:%S", time.localtime(t)))
+        row.add_prefix(Gtk.Image(icon_name=KIND_ICON.get(kind, "dialog-information-symbolic")))
+        if kind in ("warn", "error"):
+            row.add_css_class("warning" if kind == "warn" else "error")
+        return row
+
+    def refresh(self, force=False):
+        lv = core.activity.live()
+        if not core.running():
+            self.status.set_text("Model stopped")
+        else:
+            self.status.set_text(live_text(lv))
+        self.source.set_text(f"For: {lv['source']}" if lv["state"] != "idle" else
+                             (f"Last: {lv['last']['tps']:.1f} tok/s for {lv['last']['source']}, {ago(lv['last']['time'])}"
+                              if lv["last"] else "Waiting for a request from the chat, dsh or your phone"))
+        feed = core.activity.feed()
+        end = self._at_end(self.feed_sw)
+        if force or feed[:len(self.shown)] != self.shown:
+            while (r := self.list.get_first_child()):
+                self.list.remove(r)
+            self.shown = []
+        for e in feed[len(self.shown):]:
+            self.list.append(self._row(*e))
+        if len(feed) != len(self.shown) or force:
+            self.shown = list(feed)
+            if end or force:
+                self._to_end(self.feed_sw)
+        if self.stack.get_visible_child_name() == "raw":
+            txt = core.log_tail(400)
+            buf = self.raw.get_buffer()
+            if buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False) != txt:
+                end = self._at_end(self.raw_sw)
+                buf.set_text(txt)
+                if end or force:
+                    self._to_end(self.raw_sw)
+
+
+class ActivityWindow(Adw.Window):
+    """Pop-out live view to keep next to dsh."""
+
+    def __init__(self, win):
+        super().__init__(title="Inkwell · Live activity", default_width=440, default_height=760)
+        tv = Adw.ToolbarView()
+        tv.add_top_bar(Adw.HeaderBar())
+        self.view = ActivityView(win, compact=False)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(self.view, f"set_margin_{m}")(10)
+        tv.set_content(self.view)
+        self.set_content(tv)
+
+
+class ActivityButton(Gtk.MenuButton):
+    """Header dropdown with the live view and a button to pop it out into its own window."""
+
+    def __init__(self, win):
+        super().__init__(icon_name="view-list-bullet-symbolic", tooltip_text="Activity: what Inkling is doing")
+        self.win = win
+        self.seen = 0
+        self.popout = None
+        pop = Gtk.Popover()
+        self.set_popover(pop)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
+                      margin_start=8, margin_end=8)
+        box.set_size_request(500, -1)
+        head = Gtk.Box()
+        head.append(Gtk.Label(label="Activity", css_classes=["heading"], hexpand=True, xalign=0))
+        pb = Gtk.Button(label="Pop out", icon_name="window-new-symbolic", css_classes=["flat"],
+                        tooltip_text="Open in its own window, e.g. next to dsh")
+        pb.set_child(Adw.ButtonContent(label="Pop out", icon_name="window-new-symbolic"))
+        pb.connect("clicked", lambda *_: (pop.popdown(), self.open_window()))
+        head.append(pb)
+        box.append(head)
+        self.view = ActivityView(win, compact=True)
+        box.append(self.view)
+        pop.set_child(box)
+        pop.connect("show", lambda *_: self.view.refresh(force=True))
+
+    def open_window(self):
+        if not self.popout:
+            self.popout = ActivityWindow(self.win)
+            self.popout.connect("close-request", lambda *_: setattr(self, "popout", None) or False)
+        self.popout.present()
+
+    def refresh(self):
+        feed_len = len(core.activity.feed())
+        visible = self.get_popover().get_visible()
+        if visible or self.popout:
+            self.seen = feed_len
+        unseen = [e for e in core.activity.feed()[self.seen:] if e[1] in ("warn", "error")]
+        self.set_icon_name("dialog-warning-symbolic" if unseen else "view-list-bullet-symbolic")
+        if visible:
+            self.view.refresh()
+        if self.popout:
+            self.popout.view.refresh()
+
+
+def ago(t):
+    d = time.time() - t
+    return "just now" if d < 60 else f"{int(d // 60)} min ago" if d < 3600 else f"{int(d // 3600)} h ago"
+
+
 # ---------------- window / app ----------------
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
@@ -815,7 +1000,9 @@ class Window(Adw.ApplicationWindow):
         self.stack = Adw.ViewStack()
         sw = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
         hb.set_title_widget(sw)
-        self.pill = Gtk.Label(label="…", css_classes=["status-pill"])
+        self.pill = Gtk.Label(label="…", css_classes=["status-pill", "numeric"])
+        self.activity = ActivityButton(self)
+        hb.pack_end(self.activity)
         hb.pack_end(self.pill)
         tv.add_top_bar(hb)
         self.chat = ChatPage(self)
@@ -829,7 +1016,7 @@ class Window(Adw.ApplicationWindow):
         self.set_content(self.toasts)
         self.connect("close-request", self.on_close)
         self._polling = False
-        GLib.timeout_add(1500, self.poll)
+        GLib.timeout_add(1000, self.poll)
         self.poll()
 
     def toast(self, msg):
@@ -842,6 +1029,7 @@ class Window(Adw.ApplicationWindow):
         self._polling = True
 
         def work():
+            core.activity.poll()
             st = {"running": core.running(), "exit": core.exit_code(), "gpu": core.gpu(),
                   "log": core.log_tail(), "ip": core.lan_ip(), "dsh": core.dsh_state()}
             st["health"] = core.health() if st["running"] else None
@@ -858,13 +1046,22 @@ class Window(Adw.ApplicationWindow):
             p.set_text("● Crashed" if st["exit"] else "● Stopped")
             p.add_css_class("status-err" if st["exit"] else "status-warn")
         elif st["health"] == "ok":
-            p.set_text("● Ready" + (" · Wi-Fi on" if core.CONF["lan"] else ""))
+            lv = core.activity.live()
+            if lv["state"] == "reading":
+                p.set_text(f"● Reading prompt {lv['prompt_frac'] * 100:.0f}%"
+                           + (f" · {lv['prompt_tps']:.0f} tok/s" if lv["prompt_tps"] else ""))
+            elif lv["state"] == "writing":
+                p.set_text(f"● Writing · {lv['gen_tps']:.1f} tok/s")
+            else:
+                p.set_text("● Ready" + (" · Wi-Fi on" if core.CONF["lan"] else ""))
+            p.set_tooltip_text(f"Working for: {lv['source']}" if lv["state"] != "idle" else None)
             p.add_css_class("status-ok")
         else:
             p.set_text("● Loading…")
             p.add_css_class("status-warn")
         self.model.update(st)
         self.net.update(st)
+        self.activity.refresh()
         return False
 
     def on_close(self, *_):

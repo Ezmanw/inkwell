@@ -17,6 +17,10 @@ Inkwell is a native GTK4/libadwaita app that sets everything up for you:
 - **Phone & other devices:** share it on your Wi-Fi as an **OpenAI-compatible API** with a key. Paste the
   URL and key into any phone chat app that supports custom OpenAI providers (QR codes included).
 - **dsh (DeepSeek Harness):** one button adds Inkling to a dsh profile. Your old config is backed up first.
+- **See what it's doing:** the header shows live speed for *any* app using the model (dsh, your phone, the
+  chat), e.g. "Writing · 37 tok/s". The **Activity** button opens a plain-English feed ("An app sent a
+  request", "Wrote 412 tokens at 36 tok/s", "Context full…") or the raw server log. **Pop out** puts it in its
+  own window to keep next to dsh.
 - **Tuning without flags:** context size, batch size, cache quality, where the vision part runs
   (GPU/CPU/off), thinking effort, thinking limit, and live VRAM and speed readouts.
 
@@ -27,7 +31,7 @@ Needs **Ubuntu 24.04+, Pop!_OS 24.04, Linux Mint 22, Debian 13** or newer (GTK 4
 1. Download `inkwell_<version>_all.deb` from [Releases](https://github.com/Ezmanw/inkwell/releases).
 2. Install it:
    ```bash
-   sudo apt install ./inkwell_0.1.3_all.deb
+   sudo apt install ./inkwell_0.1.4_all.deb
    ```
 3. Open **Inkwell** from your app menu and follow the setup. Plan on 10–30 minutes (mostly compiling and
    downloading) and 10–25 GB of disk.
