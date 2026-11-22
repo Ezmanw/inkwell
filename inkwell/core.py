@@ -264,13 +264,33 @@ def engines():
     src = Path(CONF.get("llama_src") or "")
     for exe in sorted(src.glob("build-*/bin/llama-server")):
         out[exe.parent.parent.name[len("build-"):]] = str(exe)
+    def add(key, pth):
+        if pth in out.values():
+            return
+        k, n = key, 2
+        while k in out:                      # two builds with the same backend: keep both, label the 2nd
+            k, n = f"{key} #{n}", n + 1
+        out[k] = pth
     for b, pth in (CONF.get("extra_engines") or {}).items():
         if Path(pth).exists():
-            out.setdefault(b, pth)
+            add(b, pth)
     cur = CONF.get("llama_server")
-    if cur and Path(cur).exists() and cur not in out.values():
-        out[CONF.get("backend") or "custom"] = cur
+    if cur and Path(cur).exists():
+        add(CONF.get("backend") or "custom", cur)
     return out
+
+
+def current_engine():
+    cur = CONF.get("llama_server")
+    return next((k for k, v in engines().items() if v == cur), None)
+
+
+def engine_label(key):
+    base, _, n = key.partition(" #")
+    name = ENGINE_NAMES.get(base, base)
+    p = engines().get(key, "")
+    return f"{name} ({Path(p).parent.parent.name})" if n or any(
+        k.startswith(base + " #") for k in engines()) else name
 
 
 def remember_current_engine():
@@ -284,8 +304,8 @@ def remember_current_engine():
 def switch_engine(backend):
     path = engines()[backend]
     remember_current_engine()
-    CONF["backend"], CONF["llama_server"] = backend, path
-    CONF["gpu_layers"] = 0 if backend == "cpu" else (CONF["gpu_layers"] or 99)
+    CONF["backend"], CONF["llama_server"] = backend.split(" #")[0], path
+    CONF["gpu_layers"] = 0 if backend.startswith("cpu") else (CONF["gpu_layers"] or 99)
     save_conf()
     stop()
     return start()
@@ -318,14 +338,30 @@ def start():
         return "Starting"
 
 
+DRAFT_FATAL = ("failed to load draft model", "failed to create MTP context", "failed to create draft context")
+OOM_MARKERS = ("cudaMalloc failed: out of memory", "ErrorOutOfDeviceMemory", "hipMalloc failed", "out of memory")
+
+
+def draft_failure(log_text):
+    """Did llama-server exit because of the drafter? Only real fatal lines count: llama.cpp also logs
+    harmless 'failed to measure the memory of the extra model' lines during normal startup."""
+    tail = log_text.splitlines()[-40:]
+    if any(m in line for line in tail for m in DRAFT_FATAL):
+        return True
+    loading_err = any("exiting due to model loading error" in l or "failed to create" in l for l in tail)
+    oom = any(m in line for line in tail for m in OOM_MARKERS)
+    return oom and (loading_err or any("draft" in l.lower() for l in tail))
+
+
 def _watch_draft_start(proc):
     """If the model dies at startup because of the drafter, switch the drafter off and start again."""
     try:
         proc.wait(180)
     except subprocess.TimeoutExpired:
         return
-    tail = log_tail(80)
-    if "draft model" in tail and ("failed to load" in tail or "failed to create" in tail or "out of memory" in tail):
+    if getattr(proc, "inkwell_stopped", False) or proc.returncode in (0, -signal.SIGTERM, -signal.SIGKILL):
+        return                                    # stopped on purpose (Stop, Apply, engine switch, quit)
+    if draft_failure(log_tail(200)):
         CONF["draft_on"] = False
         save_conf()
         activity.add("warn", "The speed-up drafter couldn't start with this engine or didn't fit in VRAM, "
@@ -337,6 +373,7 @@ def stop():
     global _proc
     with _lock:
         if running():
+            _proc.inkwell_stopped = True        # tells the drafter watchdog this exit was on purpose
             os.killpg(_proc.pid, signal.SIGTERM)
             try:
                 _proc.wait(10)

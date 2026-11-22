@@ -695,11 +695,11 @@ class ModelPage(Adw.PreferencesPage):
     def refresh_engines(self):
         eng = core.engines()
         keys = list(eng)
-        cur = core.CONF.get("backend")
+        cur = core.current_engine()
         if keys != self.engine_keys:
             self._engine_lock = True
             self.engine_keys = keys
-            self.engine_row.set_model(Gtk.StringList.new([core.ENGINE_NAMES.get(k, k) for k in keys] or ["None built"]))
+            self.engine_row.set_model(Gtk.StringList.new([core.engine_label(k) for k in keys] or ["None built"]))
             self._engine_lock = False
         if cur in keys and self.engine_row.get_selected() != keys.index(cur):
             self._engine_lock = True
@@ -711,12 +711,12 @@ class ModelPage(Adw.PreferencesPage):
         if self._engine_lock or not self.engine_keys:
             return
         b = self.engine_keys[row.get_selected()]
-        if b == core.CONF.get("backend"):
+        if b == core.current_engine():
             return
 
         def work():
             msg = core.switch_engine(b)
-            GLib.idle_add(self.win.toast, f"Switched to {core.ENGINE_NAMES.get(b, b)}. {msg}…")
+            GLib.idle_add(self.win.toast, f"Switched to {core.engine_label(b)}. {msg}…")
         threading.Thread(target=work, daemon=True).start()
 
     def on_draft_toggle(self, row, _p):
