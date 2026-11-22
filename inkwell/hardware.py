@@ -164,11 +164,14 @@ def missing_tools(backend):
         if not _have_header("spirv/unified1/spirv.hpp"):
             miss.append(("spirv headers", "SPIR-V headers"))
     elif backend == "rocm":
-        if not shutil.which("hipcc") and not Path("/opt/rocm/bin/hipcc").exists():
+        # AMD's ROCm (/opt/rocm*, possibly split into core-X.Y folders) or the distro's packages.
+        def found(*rel):
+            return any(glob.glob(f"/opt/rocm*/{r}") or glob.glob(f"/opt/rocm*/*/{r}") for r in rel)
+        if not shutil.which("hipcc") and not found("bin/hipcc"):
             miss.append(("hipcc", "ROCm compiler"))
-        if not shutil.which("rocminfo") and not Path("/opt/rocm/bin/rocminfo").exists():
+        if not shutil.which("rocminfo") and not found("bin/rocminfo"):
             miss.append(("rocminfo", "detect your AMD GPU model"))
-        if not (_have_header("hipblas/hipblas.h") or Path("/opt/rocm/include/hipblas/hipblas.h").exists()):
+        if not (_have_header("hipblas/hipblas.h") or found("include/hipblas/hipblas.h")):
             miss.append(("hipBLAS", "ROCm math library"))
         from . import builder  # local import: builder imports this module
         root = builder.rocm_root()

@@ -154,6 +154,53 @@ HIP_LANG = ["lib/cmake/hip-lang/hip-lang-config.cmake", "lib64/cmake/hip-lang/hi
             "lib/x86_64-linux-gnu/cmake/hip-lang/hip-lang-config.cmake"]
 
 
+# CMake packages llama.cpp's HIP build pulls in, directly or through hip-config-amd.cmake.
+ROCM_PKGS = {"hip": "hip-config.cmake", "hip-lang": "hip-lang-config.cmake", "hipblas": "hipblas-config.cmake",
+             "hipblas-common": "hipblas-common-config.cmake", "rocblas": "rocblas-config.cmake",
+             "AMDDeviceLibs": "AMDDeviceLibsConfig.cmake", "amd_comgr": "amd_comgr-config.cmake",
+             "hsa-runtime64": "hsa-runtime64Config.cmake", "rccl": "rccl-config.cmake"}
+
+
+def _cmake_cfg_ok(cfg):
+    """False for redirect stubs whose include() target doesn't exist. Split ROCm installs ship e.g.
+    /opt/rocm/lib/cmake/AMDDeviceLibs/AMDDeviceLibsConfig.cmake -> ../../llvm/lib/cmake/... which isn't there."""
+    try:
+        text = Path(cfg).read_text(errors="replace")
+    except OSError:
+        return False
+    for m in re.finditer(r'include\(\s*"?([^")\s]+)"?\s*\)', text):
+        target = m.group(1).replace("${CMAKE_CURRENT_LIST_DIR}", str(Path(cfg).parent))
+        if "$" in target or not target.endswith(".cmake"):
+            continue
+        t = Path(target) if Path(target).is_absolute() else Path(cfg).parent / target
+        if not t.exists():
+            return False
+    return True
+
+
+def rocm_package_dirs():
+    """{package: dir} for each ROCm CMake package found inside AMD's /opt/rocm* install. Passing these as
+    <pkg>_DIR stops CMake mixing in a distro HIP (/usr/lib/x86_64-linux-gnu/cmake/hip) with AMD's ROCm."""
+    out = {}
+    g = ROCM_GLOB
+    patterns = [f"{g}/lib*/cmake/{{p}}", f"{g}/*/lib*/cmake/{{p}}", f"{g}/lib/llvm/lib*/cmake/{{p}}",
+                f"{g}/*/lib/llvm/lib*/cmake/{{p}}", f"{g}/llvm/lib*/cmake/{{p}}", f"{g}/lib/x86_64-linux-gnu/cmake/{{p}}",
+                f"{g}/*/lib/x86_64-linux-gnu/cmake/{{p}}", f"{g}/*/*/lib*/cmake/{{p}}"]
+    for pkg, fname in ROCM_PKGS.items():
+        hits = []
+        for pat in patterns:
+            for d in glob.glob(pat.format(p=pkg)):
+                cfg = Path(d, fname)
+                if not cfg.exists():
+                    alt = list(Path(d).glob("*onfig.cmake")) + list(Path(d).glob("*-config.cmake"))
+                    cfg = alt[0] if alt else cfg
+                if cfg.exists() and _cmake_cfg_ok(cfg):
+                    hits.append(str(Path(d).resolve()))
+        if hits:
+            out[pkg] = sorted(set(hits), key=lambda x: ("core-" not in x, x))[0] if len(set(hits)) > 1 else hits[0]
+    return out
+
+
 def rocm_root():
     """The ROCm prefix that actually holds hip-lang's CMake package. Newer ROCm releases split
     things into /opt/rocm/core-X.Y etc., where the compiler's folder is not where hip-lang lives."""
@@ -228,7 +275,13 @@ def cmake_flags(backend, sysinfo):
         f += ["-DGGML_HIP=ON"] + ([f"-DAMDGPU_TARGETS={gfx}", f"-DGPU_TARGETS={gfx}"] if gfx else [])
         root = rocm_root()
         if root:  # tell CMake's HIP language where hip-lang lives, independent of the compiler's folder
-            f += [f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", f"-DCMAKE_PREFIX_PATH={root}", f"-DROCM_PATH={root}"]
+            f += [f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", f"-DROCM_PATH={root}"]
+        dirs = rocm_package_dirs()
+        f += [f"-D{pkg}_DIR={d}" for pkg, d in dirs.items()]
+        prefixes = [root] if root else []
+        prefixes += sorted({str(Path(d).parents[2]) for d in dirs.values()} - set(prefixes))
+        if prefixes:
+            f.append("-DCMAKE_PREFIX_PATH=" + ";".join(prefixes))
         hip_flags, _ = rocm_hip_flags(root, rocm_clang(root, {"PATH": "/opt/rocm/bin:" + os.environ.get("PATH", "")}))
         if hip_flags:
             f.append("-DCMAKE_HIP_FLAGS=" + " ".join(hip_flags))

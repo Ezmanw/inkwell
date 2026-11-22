@@ -13,7 +13,15 @@ case "$backend" in cuda|vulkan|rocm|cpu) ;; *) echo "unknown backend: $backend" 
 pkgs=(git cmake ninja-build build-essential ca-certificates)
 case "$backend" in
   vulkan) pkgs+=(libvulkan-dev glslc spirv-headers) ;;
-  rocm)   pkgs+=(hipcc libhipblas-dev librocblas-dev rocminfo) ;;
+  rocm)
+    if ls -d /opt/rocm*/bin/hipcc /opt/rocm*/*/bin/hipcc >/dev/null 2>&1; then
+      # AMD's ROCm is already installed. Don't add the distro's older ROCm next to it: CMake then mixes
+      # the two (distro hip-config + AMD's split layout) and the build fails.
+      echo "AMD ROCm found in /opt/rocm; not installing the distro's ROCm packages."
+    else
+      echo "Note: the distro's ROCm can be too old for the newest cards (e.g. RX 9000 / gfx12 needs ROCm 6.4+)."
+      pkgs+=(hipcc libhipblas-dev librocblas-dev rocminfo)
+    fi ;;
 esac
 
 if [ "$backend" = cuda ]; then
