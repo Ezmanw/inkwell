@@ -312,7 +312,16 @@ def switch_engine(backend):
 
 
 def running():
-    return _proc is not None and _proc.poll() is None
+    alive = _proc is not None and _proc.poll() is None
+    if _proc is not None and not alive and not getattr(_proc, "inkwell_reported", False):
+        _proc.inkwell_reported = True
+        if not getattr(_proc, "inkwell_stopped", False):     # nobody asked it to stop: say why it died
+            rc = _proc.returncode
+            how = (f"was killed by signal {-rc} ({signal.Signals(-rc).name})" if rc < 0 else f"exited with code {rc}")
+            last = [l for l in log_tail(30).splitlines() if " E " in l or "error" in l.lower()]
+            activity.add("error", f"The model stopped on its own: it {how}." + (f" Last error: {last[-1][-200:]}" if last else
+                         " No error in its log, so something outside it ended it (e.g. low system memory)."))
+    return alive
 
 
 def exit_code():
@@ -374,12 +383,14 @@ def stop():
     with _lock:
         if running():
             _proc.inkwell_stopped = True        # tells the drafter watchdog this exit was on purpose
-            os.killpg(_proc.pid, signal.SIGTERM)
             try:
+                os.killpg(_proc.pid, signal.SIGTERM)
                 _proc.wait(10)
             except subprocess.TimeoutExpired:
                 os.killpg(_proc.pid, signal.SIGKILL)
                 _proc.wait()
+            except ProcessLookupError:
+                pass                             # already gone
         _proc = None
         return "Stopped"
 

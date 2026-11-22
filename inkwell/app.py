@@ -865,8 +865,12 @@ class ModelPage(Adw.PreferencesPage):
         elif self.draft.get_subtitle().startswith("This engine"):
             self.draft.set_subtitle("A tiny helper model guesses ahead: up to ~1.7× faster on code, can be slower "
                                     "on prose. Needs ~0.75 GB extra VRAM (16 GB+ cards)")
-        if self.draft.get_active() != bool(core.CONF.get("draft_on")) and not self.draft.has_focus():
-            self.draft.set_active(bool(core.CONF.get("draft_on")))
+        # Follow the saved setting only when it changes behind our back (e.g. the drafter watchdog turned it
+        # off). Never overwrite a switch the user just flipped and hasn't applied yet.
+        saved = bool(core.CONF.get("draft_on"))
+        if saved != getattr(self, "_draft_saved", saved) and self.draft.get_active() != saved:
+            self.draft.set_active(saved)
+        self._draft_saved = saved
         lv = core.activity.live()
         if lv["state"] == "writing":
             self.speed_row.set_subtitle(f"Writing now at {lv['gen_tps']:.1f} tok/s for {lv['source']}")
