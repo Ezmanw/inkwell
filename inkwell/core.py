@@ -204,7 +204,7 @@ def auto_cmd():
         cmd += ["--no-mmproj"]
     from .catalog import offload_args
     cmd += offload_args(int(c.get("cpu_layers", 0)))
-    if c.get("draft_on") and c.get("draft_model") and Path(c["draft_model"]).exists():
+    if draft_active():
         # q4_0 draft KV: with the f16 default the draft cache can overflow a 16 GB card and AMD's
         # driver then silently spills to RAM, making everything 2-5x slower (llama.cpp #32773).
         cmd += ["--model-draft", c["draft_model"], "--spec-type", "draft-dspark",
@@ -224,6 +224,37 @@ def auto_cmd():
 
 
 ENGINE_NAMES = {"cuda": "CUDA", "vulkan": "Vulkan", "rocm": "ROCm", "cpu": "CPU only"}
+
+
+DSPARK_COMMIT = "0a9105de42d2c3e3cbc72cb1f398c743ada4f342"   # llama.cpp PR #32218 (Inkling 2 DSpark)
+_dspark_cache = {}
+
+
+def engine_has_dspark(exe=None):
+    """Can this llama-server load Unsloth's Inkling DSpark drafter? Only builds that include PR #32218 can;
+    mainline's generic dflash loader rejects the file ('markov_w1.weight has wrong shape')."""
+    exe = exe or CONF.get("llama_server") or ""
+    if exe in _dspark_cache:
+        return _dspark_cache[exe]
+    ok = False
+    p = Path(exe).resolve()
+    for root in p.parents:                       # find the git checkout the binary was built from
+        if (root / ".git").exists():
+            marker = root / ".git" / "inkwell-pin"
+            if marker.exists() and DSPARK_COMMIT in marker.read_text():
+                ok = True
+            else:
+                ok = subprocess.run(["git", "merge-base", "--is-ancestor", DSPARK_COMMIT, "HEAD"], cwd=root,
+                                    capture_output=True).returncode == 0
+            break
+    _dspark_cache[exe] = ok
+    return ok
+
+
+def draft_active():
+    c = CONF
+    return bool(c.get("draft_on") and c.get("draft_model") and Path(c["draft_model"]).exists()
+                and engine_has_dspark())
 
 
 def engines():
@@ -282,7 +313,24 @@ def start():
         activity.started_at = time.time()
         _proc = subprocess.Popen(llama_cmd(), stdout=log, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, start_new_session=True)
+        if not CONF.get("manual") and draft_active():
+            threading.Thread(target=_watch_draft_start, args=(_proc,), daemon=True).start()
         return "Starting"
+
+
+def _watch_draft_start(proc):
+    """If the model dies at startup because of the drafter, switch the drafter off and start again."""
+    try:
+        proc.wait(180)
+    except subprocess.TimeoutExpired:
+        return
+    tail = log_tail(80)
+    if "draft model" in tail and ("failed to load" in tail or "failed to create" in tail or "out of memory" in tail):
+        CONF["draft_on"] = False
+        save_conf()
+        activity.add("warn", "The speed-up drafter couldn't start with this engine or didn't fit in VRAM, "
+                             "so it was switched off and the model restarted without it.")
+        start()
 
 
 def stop():

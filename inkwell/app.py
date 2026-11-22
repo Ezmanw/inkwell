@@ -857,6 +857,16 @@ class ModelPage(Adw.PreferencesPage):
             self.vram_lbl.set_text(f"{g['used'] / 1024:.1f} / {g['total'] / 1024:.0f} GB")
             self.vram_bar.set_value(g["used"] / g["total"])
             self.vram_row.set_subtitle(g["name"] + (f" · Inkling uses {g['model'] / 1024:.1f} GB" if g["model"] else ""))
+        has = core.engine_has_dspark()
+        self.draft.set_sensitive(has and not core.CONF.get("manual"))
+        if not has:
+            self.draft.set_subtitle("This engine was built without drafter support. Use Setup → Build another… "
+                                    "to build one with it")
+        elif self.draft.get_subtitle().startswith("This engine"):
+            self.draft.set_subtitle("A tiny helper model guesses ahead: up to ~1.7× faster on code, can be slower "
+                                    "on prose. Needs ~0.75 GB extra VRAM (16 GB+ cards)")
+        if self.draft.get_active() != bool(core.CONF.get("draft_on")) and not self.draft.has_focus():
+            self.draft.set_active(bool(core.CONF.get("draft_on")))
         lv = core.activity.live()
         if lv["state"] == "writing":
             self.speed_row.set_subtitle(f"Writing now at {lv['gen_tps']:.1f} tok/s for {lv['source']}")
