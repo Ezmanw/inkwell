@@ -33,7 +33,7 @@ DEFAULTS = {
     "cpu_layers": 0,                       # how many non-loop layers' experts live in system RAM
     "vision_mode": "cpu",  # gpu | cpu | off
     "ctx": 32768,
-    "ubatch": 128,
+    "ubatch": 512,            # measured on a 3060: 540 tok/s prompt reading vs ~380 at 128-256
     "kv_quant": "q8_0",
     "gpu_layers": 99,
     "threads": max(1, (os.cpu_count() or 2) // 2),
@@ -41,6 +41,10 @@ DEFAULTS = {
     "lan": False,
     "token": "sk-inkwell-" + secrets.token_urlsafe(18),
     "dsh_profile": "web",
+    "draft_on": False,        # DSpark speculative decoding (when the drafter file is present)
+    "draft_model": "",
+    "draft_n": 4,             # tokens drafted per step; 4 measured best on code (llama.cpp #32773)
+    "cache_reuse": 0,         # llama.cpp disables --cache-reuse for Inkling; prefix reuse is automatic
     "manual": False,          # Manual mode: run llama-server with exactly manual_args, nothing added
     "manual_args": "",
     "autostart": True,
@@ -200,6 +204,15 @@ def auto_cmd():
         cmd += ["--no-mmproj"]
     from .catalog import offload_args
     cmd += offload_args(int(c.get("cpu_layers", 0)))
+    if c.get("draft_on") and c.get("draft_model") and Path(c["draft_model"]).exists():
+        # q4_0 draft KV: with the f16 default the draft cache can overflow a 16 GB card and AMD's
+        # driver then silently spills to RAM, making everything 2-5x slower (llama.cpp #32773).
+        cmd += ["--model-draft", c["draft_model"], "--spec-type", "draft-dspark",
+                "--spec-draft-n-max", str(int(c.get("draft_n", 4))),
+                "-ngld", "0" if int(c["gpu_layers"]) == 0 else "99", "-ctkd", "q4_0", "-ctvd", "q4_0",
+                "--spec-draft-n-ubatch", "16"]   # small draft batch: saves ~85 MB of VRAM
+    if int(c.get("cache_reuse", 0)) > 0:
+        cmd += ["--cache-reuse", str(int(c["cache_reuse"]))]
     if c["kv_quant"] != "f16":
         cmd += ["-ctk", c["kv_quant"], "-ctv", c["kv_quant"]]
     if c["extra_args"].strip():

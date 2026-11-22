@@ -65,6 +65,8 @@ class Wizard(Adw.ApplicationWindow):
             "llama_src": core.CONF["llama_src"],
             "models_dir": core.CONF["models_dir"],
             "quant": None, "vision": core.CONF.get("vision_mode", "cpu") != "off", "existing": None,
+            "draft": core.CONF.get("draft_on") or bool(self.sys.best_gpu and
+                                                       self.sys.best_gpu.vram_mb >= catalog.DRAFT_MIN_VRAM_MB),
         }
         self.toasts = Adw.ToastOverlay()
         self.nav = Adw.NavigationView()
@@ -310,6 +312,12 @@ class Wizard(Adw.ApplicationWindow):
                             active=self.choice["vision"])
         vis.connect("notify::active", lambda r, _p: self.choice.update(vision=r.get_active()))
         opt.add(vis)
+        dr = Adw.SwitchRow(title="Speed-up drafter (DSpark)",
+                           subtitle="A tiny helper model guesses ahead: up to ~1.7× faster on code, can be slower "
+                                    "on prose. Needs ~0.75 GB extra VRAM, so it's for 16 GB+ cards. +402 MB download",
+                           active=self.choice["draft"])
+        dr.connect("notify::active", lambda r, _p: self.choice.update(draft=r.get_active()))
+        opt.add(dr)
         have = Adw.ActionRow(title="I already have a GGUF file",
                              subtitle="Use an Inkling 2 Mini .gguf you downloaded before (mainline layout)")
         hb = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER, css_classes=["flat"])
@@ -397,6 +405,8 @@ class Wizard(Adw.ApplicationWindow):
                 plan.append(("model", f"Download {c['quant'].short} model ({c['quant'].gb:.1f} GB)"))
             if c["vision"]:
                 plan.append(("vision", "Download image support (0.6 GB)"))
+            if c["draft"]:
+                plan.append(("draft", "Download speed-up drafter (0.4 GB)"))
         for key, title in plan:
             row = Adw.ActionRow(title=title, subtitle="Waiting…")
             bar = Gtk.ProgressBar(valign=Gtk.Align.CENTER, hexpand=False)
@@ -494,15 +504,14 @@ class Wizard(Adw.ApplicationWindow):
         if "build" in self.steps:
             def do_build():
                 st = lambda txt, f: self.set_step("build", None, txt, f)
-                fix = builder.prepare_source(self.runner, c["llama_src"], c["llama_mode"], st)
-                self.log(f"\n[VRAM fix: {fix}]\n")
+                patches = builder.prepare_source(self.runner, c["llama_src"], c["llama_mode"], st)
+                self.log(f"\n[patches: {patches}]\n")
                 exe = builder.build(self.runner, c["llama_src"], c["backend"], self.sys, st,
                                     lambda f: self.set_step("build", None, f"Compiling… {f * 100:.0f}%", f))
                 ok, ver = builder.binary_works(exe)
                 if not ok:
                     raise RuntimeError("llama-server was built but won't run: " + " ".join(ver))
-                note = {"fix-merged": "with the VRAM fix", "fix-already-included": "VRAM fix already included",
-                        "no-fix": "WITHOUT the VRAM fix (it couldn't be applied)"}[fix]
+                note = builder.patch_summary(patches)
                 self.set_step("build", "ok", f"Done · {note}", 1)
                 return exe
             job("build", do_build)
@@ -526,6 +535,8 @@ class Wizard(Adw.ApplicationWindow):
             job("model", dl("model", q.url, mdir / q.filename, q.size))
         if "vision" in self.steps:
             job("vision", dl("vision", catalog.mmproj_url(), mdir / catalog.MMPROJ[0], catalog.MMPROJ[1]))
+        if "draft" in self.steps:
+            job("draft", dl("draft", catalog.dspark_url(), mdir / catalog.DSPARK[0], catalog.DSPARK[1]))
 
         def watch():
             for t in threads:
@@ -562,9 +573,13 @@ class Wizard(Adw.ApplicationWindow):
                 conf["vision_mode"] = conf["vision_mode"] if conf["vision_mode"] != "off" else "cpu"
             else:
                 conf["vision_mode"] = "off"
+            conf["draft_on"] = bool(c["draft"])
+            if c["draft"]:
+                conf["draft_model"] = self.results.get("draft") or conf.get("draft_model", "")
             g = self.sys.best_gpu
             size = Path(conf["model"]).stat().st_size if conf["model"] else 0
-            fit = catalog.plan_fit(size, g.vram_mb if g else 0, self.sys.ram_mb, conf["vision_mode"] == "gpu")
+            fit = catalog.plan_fit(size, g.vram_mb if g else 0, self.sys.ram_mb, conf["vision_mode"] == "gpu",
+                                   drafter=bool(c["draft"]))
             conf["cpu_layers"] = fit["cpu_layers"] if fit["status"] in ("split", "ram_tight") else 0
             conf["gpu_layers"] = 0 if c["backend"] == "cpu" else fit["gpu_layers"]
         conf["setup_done"] = True

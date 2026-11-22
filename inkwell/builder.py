@@ -11,6 +11,12 @@ LLAMA_GIT = "https://github.com/ggml-org/llama.cpp"
 PINNED_BASE = "e6d624b9a4b95c6b52f5ca384d70b75581f9821a"
 FIX_PR = 32740
 FIX_PR_COMMIT = "ff91e4f84de442a954e2c73178b78630997df9f0"
+# Pinned PRs applied on top of PINNED_BASE: (name, PR number, tested commit).
+#  - #32740 at this commit still has its Vulkan support (removed upstream later).
+#  - #32218 at this commit is the version measured on an RX 9070 XT with unsloth's DSpark GGUF (#32773);
+#    newer revisions may need a reconverted drafter file.
+PATCHES = [("the VRAM fix", FIX_PR, FIX_PR_COMMIT),
+           ("DSpark drafting", 32218, "0a9105de42d2c3e3cbc72cb1f398c743ada4f342")]
 GIT_ID = ["-c", "user.name=Inkwell", "-c", "user.email=inkwell@localhost"]
 
 
@@ -60,8 +66,13 @@ class Runner:
 
 
 # ---------------- llama.cpp ----------------
+def _pin_id():
+    return PINNED_BASE + "+" + "+".join(c for _, _, c in PATCHES)
+
+
 def prepare_source(r, src, mode, step):
-    """mode: 'recommended' (pinned + fix) or 'latest' (master + fix if still needed)."""
+    """mode: 'recommended' (tested base + pinned patches) or 'latest' (master + each patch's newest
+    version, skipped if already upstream). Returns {patch name: merged|included|skipped}."""
     src = Path(src)
     if not (src / ".git").exists():
         step("Downloading llama.cpp source…", None)
@@ -69,35 +80,51 @@ def prepare_source(r, src, mode, step):
         if src.exists() and any(src.iterdir()):
             raise RuntimeError(f"{src} exists and isn't a llama.cpp checkout. Pick an empty folder.")
         r.run(["git", "clone", "--filter=blob:none", "--progress", LLAMA_GIT, str(src)])
-    # Already at the tested version with the fix? Leave the files alone so the rebuild is incremental.
-    if mode == "recommended" and r.out(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=src) == "inkwell":
-        has = lambda c: r.run(["git", "merge-base", "--is-ancestor", c, "HEAD"], cwd=src, check=False) == 0
-        clean = r.out(["git", "status", "--porcelain", "--untracked-files=no"], cwd=src) == ""
-        if clean and r.out(["git", "rev-parse", "HEAD^1"], cwd=src) == PINNED_BASE and has(FIX_PR_COMMIT):
-            step("llama.cpp source is up to date", None)
-            return "fix-merged"
+    marker = src / ".git" / "inkwell-pin"
+    # Already at exactly this recipe? Leave the files alone so the rebuild is incremental.
+    if mode == "recommended" and marker.exists() and marker.read_text().strip() == _pin_id() \
+            and r.out(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=src) == "inkwell" \
+            and r.out(["git", "status", "--porcelain", "--untracked-files=no"], cwd=src) == "":
+        step("llama.cpp source is up to date", None)
+        return {name: "merged" for name, _, _ in PATCHES}
+    marker.unlink(missing_ok=True)
     step("Updating llama.cpp…", None)
     r.run(["git", "fetch", "--filter=blob:none", "origin", "master"], cwd=src)
     base = PINNED_BASE if mode == "recommended" else "FETCH_HEAD"
     if mode == "recommended":
         r.run(["git", "fetch", "--filter=blob:none", "origin", PINNED_BASE], cwd=src, check=False)
     r.run(["git", "checkout", "-f", "-B", "inkwell", base], cwd=src)
-    step("Adding the Inkling VRAM fix…", None)
-    rc = r.run(["git", "fetch", "--filter=blob:none", "origin", f"pull/{FIX_PR}/head"], cwd=src, check=False)
-    target = "FETCH_HEAD"
-    if mode == "recommended":
-        if r.run(["git", "fetch", "--filter=blob:none", "origin", FIX_PR_COMMIT], cwd=src, check=False) == 0:
-            target = FIX_PR_COMMIT
-    if rc != 0 and target == "FETCH_HEAD":
-        r.on_log("! Couldn't fetch the VRAM fix; building without it.\n")
-        return "no-fix"
-    if r.run(["git", "merge-base", "--is-ancestor", target, "HEAD"], cwd=src, check=False) == 0:
-        return "fix-already-included"
-    if r.run(["git", *GIT_ID, "merge", "--no-edit", target], cwd=src, check=False) != 0:
-        r.run(["git", "merge", "--abort"], cwd=src, check=False)
-        r.on_log("! The VRAM fix no longer merges cleanly; building without it.\n")
-        return "no-fix"
-    return "fix-merged"
+    result = {}
+    for name, pr, commit in PATCHES:
+        step(f"Adding {name} (llama.cpp PR #{pr})…", None)
+        target = None
+        if mode == "recommended" and r.run(["git", "fetch", "--filter=blob:none", "origin", commit],
+                                           cwd=src, check=False) == 0:
+            target = commit
+        elif r.run(["git", "fetch", "--filter=blob:none", "origin", f"pull/{pr}/head"], cwd=src, check=False) == 0:
+            target = r.out(["git", "rev-parse", "FETCH_HEAD"], cwd=src)
+        if not target:
+            r.on_log(f"! Couldn't fetch {name}; building without it.\n")
+            result[name] = "skipped"
+            continue
+        if r.run(["git", "merge-base", "--is-ancestor", target, "HEAD"], cwd=src, check=False) == 0:
+            result[name] = "included"
+            continue
+        if r.run(["git", *GIT_ID, "merge", "--no-edit", target], cwd=src, check=False) != 0:
+            r.run(["git", "merge", "--abort"], cwd=src, check=False)
+            r.on_log(f"! {name} no longer merges cleanly; building without it.\n")
+            result[name] = "skipped"
+            continue
+        result[name] = "merged"
+    if mode == "recommended" and all(v != "skipped" for v in result.values()):
+        marker.write_text(_pin_id())
+    return result
+
+
+def patch_summary(result):
+    ok = [n for n, v in result.items() if v != "skipped"]
+    bad = [n for n, v in result.items() if v == "skipped"]
+    return ("with " + " + ".join(ok) if ok else "") + (f" · WITHOUT {', '.join(bad)}" if bad else "")
 
 
 def build_env(backend):

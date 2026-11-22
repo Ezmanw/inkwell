@@ -586,7 +586,17 @@ class ModelPage(Adw.PreferencesPage):
         self.threads.set_title("CPU threads")
         self.threads.set_value(c["threads"])
         self.auto = Adw.SwitchRow(title="Start the model when the app opens", active=c["autostart"])
-        for w in (self.ctx, self.ub, self.kv, self.vision, self.threads, self.auto):
+        self.draft = Adw.SwitchRow(title="Speed-up drafter (DSpark)",
+                                   subtitle="A tiny helper model guesses ahead: up to ~1.7× faster on code, can be "
+                                            "slower on prose. Needs ~0.75 GB extra VRAM (16 GB+ cards)",
+                                   active=bool(c.get("draft_on")))
+        self.draft_n = Adw.SpinRow.new_with_range(2, 5, 1)
+        self.draft_n.set_title("Draft length")
+        self.draft_n.set_subtitle("Tokens guessed per step. 4 measured best on code; 2–3 for mostly prose")
+        self.draft_n.set_value(int(c.get("draft_n", 4)))
+        self.draft.bind_property("active", self.draft_n, "sensitive", 2)  # SYNC_CREATE
+        self.draft.connect("notify::active", self.on_draft_toggle)
+        for w in (self.ctx, self.ub, self.kv, self.vision, self.draft, self.draft_n, self.threads, self.auto):
             s.add(w)
         apply_row = Adw.ActionRow()
         ab = Gtk.Button(label="Apply & restart model", css_classes=["suggested-action", "pill"],
@@ -709,6 +719,30 @@ class ModelPage(Adw.PreferencesPage):
             GLib.idle_add(self.win.toast, f"Switched to {core.ENGINE_NAMES.get(b, b)}. {msg}…")
         threading.Thread(target=work, daemon=True).start()
 
+    def on_draft_toggle(self, row, _p):
+        """Turning the drafter on without the file downloads it next to the model."""
+        c = core.CONF
+        if not row.get_active() or (c.get("draft_model") and Path(c["draft_model"]).exists()):
+            return
+        from . import builder, catalog
+        dest = Path(c.get("models_dir") or Path(c["model"]).parent) / catalog.DSPARK[0]
+        row.set_subtitle("Downloading the drafter (402 MB)…")
+        r = builder.Runner(lambda t: None)
+
+        def prog(done, total, bps):
+            GLib.idle_add(row.set_subtitle, f"Downloading the drafter… {done / total * 100:.0f}%")
+
+        def work():
+            try:
+                path = builder.download(r, catalog.dspark_url(), dest, catalog.DSPARK[1], prog)
+                c["draft_model"] = path
+                core.save_conf()
+                GLib.idle_add(row.set_subtitle, "Downloaded. Press Apply to use it")
+            except Exception as e:
+                GLib.idle_add(row.set_subtitle, f"Download failed: {e}")
+                GLib.idle_add(row.set_active, False)
+        threading.Thread(target=work, daemon=True).start()
+
     def manual_text(self):
         b = self.manual_view.get_buffer()
         return b.get_text(b.get_start_iter(), b.get_end_iter(), False)
@@ -791,6 +825,8 @@ class ModelPage(Adw.PreferencesPage):
         c["gpu_layers"] = int(self.ngl.get_value())
         c["extra_args"] = self.extra.get_text()
         c["cpu_layers"] = int(self.cpu_layers.get_value())
+        c["draft_on"] = self.draft.get_active()
+        c["draft_n"] = int(self.draft_n.get_value())
         c["think_effort"] = round(self.effort.get_value(), 2)
         c["think_budget"] = self.budget.keys[self.budget.get_selected()]
         c["think_preserve"] = self.preserve.get_active()

@@ -12,6 +12,10 @@ FALLBACK = {
     "UD-Q4_K_M": 16610544608, "UD-Q4_K_XL": 17629760736, "UD-Q8_K_XL": 22867452896,
 }
 MMPROJ = ("mmproj-F16.gguf", 639348160)
+# DSpark speculative drafter (needs llama.cpp PR #32218, which Inkwell's recommended build includes).
+DSPARK = ("dspark-Inkling-2-Mini-Q8_0.gguf", 402278560)
+DRAFT_OVERHEAD_MB = 750   # drafter weights + its KV/compute/layer-input buffers (measured: OOM on 12 GB at 64K)
+DRAFT_MIN_VRAM_MB = 15000  # below this the drafter costs more context than it gains (3060 12 GB: no speed-up)
 
 QUALITY = {
     "IQ1_S": "Rough", "IQ1_M": "Rough", "IQ2_XXS": "Basic", "Q2_K_XL": "Decent",
@@ -23,7 +27,7 @@ QUALITY = {
 # cheapest to move to system RAM. (Moving loop-layer experts to CPU also triggers llama.cpp bug #32755.)
 NONLOOP_LAYERS = [23, 22, 21, 20, 19, 18, 0, 1, 2, 3, 4, 5]
 EXPERT_SHARE_PER_LAYER = 0.032   # one layer's experts ~= 3.2% of the file (measured on Q2_K_XL)
-OVERHEAD_MB = 2300               # context cache + compute buffers at 32K, q8_0, -ub 128, plus desktop headroom
+OVERHEAD_MB = 2500               # context cache + compute buffers at 32K, q8_0, -ub 128, plus desktop headroom
 
 
 class Quant:
@@ -62,11 +66,15 @@ def fetch_quants(timeout=8):
     return sorted((Quant(n, s) for n, s in FALLBACK.items()), key=lambda q: q.size), False
 
 
+def dspark_url():
+    return f"{HF}/{REPO}/resolve/main/{DSPARK[0]}"
+
+
 def mmproj_url():
     return f"{HF}/{REPO}/resolve/main/{MMPROJ[0]}"
 
 
-def plan_fit(quant_size, vram_mb, ram_mb, vision_on_gpu=False):
+def plan_fit(quant_size, vram_mb, ram_mb, vision_on_gpu=False, drafter=False):
     """How a model file would run here.
     status: gpu (all on the card) | split (some experts in RAM) | slow (whole layers on CPU) |
             ram_tight | cpu (no GPU). Also returns cpu_layers and gpu_layers to use."""
@@ -74,7 +82,7 @@ def plan_fit(quant_size, vram_mb, ram_mb, vision_on_gpu=False):
     if vram_mb <= 0:
         return {"status": "cpu", "cpu_layers": 0, "gpu_layers": 0}
     # measured: Q2_K_XL (8.7 GB) used 10.4 GB at 32K incl. vision; keep ~0.7 GB for the desktop
-    budget = vram_mb - OVERHEAD_MB - 0.04 * size_mb - (650 if vision_on_gpu else 0)
+    budget = vram_mb - OVERHEAD_MB - 0.04 * size_mb - (650 if vision_on_gpu else 0) - (DRAFT_OVERHEAD_MB if drafter else 0)
     if size_mb <= budget:
         return {"status": "gpu", "cpu_layers": 0, "gpu_layers": 99}
     if size_mb + 2500 > ram_mb * 0.8 + max(0, budget):
